@@ -1,18 +1,14 @@
 /**
  * Cfull stability monitor (§8.2 Cfull更新ポリシー).
  *
- * Monitors whether the fixed Cfull (2010-2014) is drifting from recent
- * market correlation structure. Alerts when drift exceeds thresholds,
- * suggesting Cfull recalibration may be needed.
- *
- * Metrics:
- *   1. Frobenius distance: ||Ct - Cfull||_F / N
- *   2. Top eigenvalue shift: |λ1(Ct) - λ1(Cfull)| / λ1(Cfull)
- *   3. Subspace angle: angle between top-K eigenspaces
+ * Metrics: Frobenius distance, top eigenvalue shift, subspace angle,
+ * gross R/R rolling 3-month (§8.2.1), monotonicity Q5 vs Q1 (D.3).
  */
 
-import { correlationMatrix } from "./linalg.js";
-import { topKEigenvectors } from "./linalg.js";
+import { correlationMatrix, topKEigenvectors } from "./linalg.js";
+
+export type GrossRRCheck = { rolling3m: number; belowThreshold: boolean; consecutiveMonthsBelow: number };
+export type MonotonicityCheck = { q5Alpha: number; q1Alpha: number; monotonic: boolean };
 
 export type CfullDriftReport = {
   date: string;
@@ -21,132 +17,121 @@ export type CfullDriftReport = {
   frobeniusNormalized: number;
   topEigenvalueShift: number;
   subspaceAngle: number;
+  grossRR?: GrossRRCheck;
+  monotonicityCheck?: MonotonicityCheck;
   alerts: string[];
   recommendation: "stable" | "monitor" | "recalibrate";
 };
 
-const FROBENIUS_WARN = 0.3;
-const FROBENIUS_ALERT = 0.5;
-const EIGENVALUE_WARN = 0.2;
-const EIGENVALUE_ALERT = 0.4;
-const SUBSPACE_WARN = 20;   // degrees
-const SUBSPACE_ALERT = 35;  // degrees
+const GROSS_RR_THRESHOLD = 0.5;
+const GROSS_RR_MONTHS = 3;
+const MONTH = 21;
+const FROB_WARN = 0.3, FROB_ALERT = 0.5;
+const EIG_WARN = 0.2, EIG_ALERT = 0.4;
+const ANGLE_WARN = 20, ANGLE_ALERT = 35; // degrees
 
-/** Frobenius distance between two N×N matrices, normalized by N. */
 function frobeniusDistance(A: number[][], B: number[][]): { raw: number; normalized: number } {
   const N = A.length;
   let sum = 0;
-  for (let i = 0; i < N; i++) {
-    for (let j = 0; j < N; j++) {
-      sum += (A[i][j] - B[i][j]) ** 2;
-    }
-  }
+  for (let i = 0; i < N; i++) for (let j = 0; j < N; j++) sum += (A[i][j] - B[i][j]) ** 2;
   const raw = Math.sqrt(sum);
   return { raw, normalized: raw / N };
 }
 
-/**
- * Principal angle between two K-dimensional subspaces.
- * Uses the smallest singular value of Q1' Q2 to compute the largest principal angle.
- * Returns angle in degrees.
- */
 function subspaceAngle(vecs1: number[][], vecs2: number[][], K: number): number {
-  // Compute Q1' Q2 (K×K matrix)
   const G: number[][] = Array.from({ length: K }, () => new Array(K).fill(0));
   for (let i = 0; i < K; i++) {
     for (let j = 0; j < K; j++) {
       let dot = 0;
-      for (let d = 0; d < vecs1[i].length; d++) {
-        dot += vecs1[i][d] * vecs2[j][d];
-      }
+      for (let d = 0; d < vecs1[i].length; d++) dot += vecs1[i][d] * vecs2[j][d];
       G[i][j] = dot;
     }
   }
-
-  // For K=3, compute approximate smallest singular value via ||G||_F
-  // min σ ≈ max(0, K - ||G||_F^2)  (rough bound)
-  // More precise: cos(θ_max) = min singular value of G
-  // For simplicity, use determinant-based approach for small K
   let frobSq = 0;
-  for (let i = 0; i < K; i++) {
-    for (let j = 0; j < K; j++) {
-      frobSq += G[i][j] ** 2;
-    }
-  }
-
-  // Average cosine similarity: sqrt(||G||_F^2 / K)
-  const avgCos = Math.sqrt(frobSq / K);
-  const clampedCos = Math.min(1, Math.max(0, avgCos));
-  return Math.acos(clampedCos) * (180 / Math.PI);
+  for (let i = 0; i < K; i++) for (let j = 0; j < K; j++) frobSq += G[i][j] ** 2;
+  const avgCos = Math.min(1, Math.max(0, Math.sqrt(frobSq / K)));
+  return Math.acos(avgCos) * (180 / Math.PI);
 }
 
-/**
- * Compute Cfull drift report for a given rolling window of recent returns.
- *
- * @param recentReturns - Recent T×N return matrix (e.g. last 120-250 days)
- * @param Cfull - The fixed Cfull correlation matrix
- * @param date - Date label for the report
- * @param K - Number of principal components to compare (default: 3)
- */
+/** Per-day gross return record for R/R and monotonicity checks. */
+export type DailyReturnRecord = { date: string; grossReturn: number; quintileRank?: number };
+
+function sliceRR(items: DailyReturnRecord[]): number {
+  const w = items.filter((d) => d.grossReturn > 0);
+  const l = items.filter((d) => d.grossReturn < 0);
+  const avgW = w.length > 0 ? w.reduce((s, d) => s + d.grossReturn, 0) / w.length : 0;
+  const avgL = l.length > 0 ? Math.abs(l.reduce((s, d) => s + d.grossReturn, 0) / l.length) : 1;
+  return avgL > 0 ? avgW / avgL : Infinity;
+}
+
+/** Rolling 3-month gross R/R and consecutive months below threshold. */
+export function computeGrossRRCheck(daily: DailyReturnRecord[]): GrossRRCheck {
+  const last63 = daily.slice(-MONTH * 3);
+  if (last63.length < 20) return { rolling3m: NaN, belowThreshold: false, consecutiveMonthsBelow: 0 };
+  const rr = sliceRR(last63);
+  let cons = 0;
+  for (let m = 0; m < 3 && daily.length >= MONTH * (m + 1); m++) {
+    if (sliceRR(daily.slice(daily.length - MONTH * (m + 1), daily.length - MONTH * m)) < GROSS_RR_THRESHOLD) cons++;
+    else break;
+  }
+  return { rolling3m: rr, belowThreshold: rr < GROSS_RR_THRESHOLD, consecutiveMonthsBelow: cons };
+}
+
+/** Q5 vs Q1 monotonicity (appendix D.3). */
+export function computeMonotonicityCheck(daily: DailyReturnRecord[]): MonotonicityCheck | undefined {
+  const q5 = daily.filter((d) => d.quintileRank === 5);
+  const q1 = daily.filter((d) => d.quintileRank === 1);
+  if (q5.length === 0 || q1.length === 0) return undefined;
+  const a5 = (q5.reduce((s, d) => s + d.grossReturn, 0) / q5.length) * 10000;
+  const a1 = (q1.reduce((s, d) => s + d.grossReturn, 0) / q1.length) * 10000;
+  return { q5Alpha: a5, q1Alpha: a1, monotonic: a5 > a1 };
+}
+
+/** Compute Cfull drift report with optional R/R and monotonicity checks. */
 export function computeCfullDrift(
-  recentReturns: number[][],
-  Cfull: number[][],
-  date: string,
-  K = 3,
+  recentReturns: number[][], Cfull: number[][], date: string, K = 3,
+  dailyReturns?: DailyReturnRecord[],
 ): CfullDriftReport {
   const Ct = correlationMatrix(recentReturns);
-  const N = Cfull.length;
-
-  // 1. Frobenius distance
   const { raw: frobRaw, normalized: frobNorm } = frobeniusDistance(Ct, Cfull);
-
-  // 2. Top eigenvalue shift
   const eigCt = topKEigenvectors(Ct, K);
   const eigCfull = topKEigenvectors(Cfull, K);
   const eigenShift = Math.abs(eigCt.values[0] - eigCfull.values[0]) / eigCfull.values[0];
-
-  // 3. Subspace angle
   const angle = subspaceAngle(eigCt.vectors, eigCfull.vectors, K);
 
-  // Generate alerts
   const alerts: string[] = [];
-  if (frobNorm >= FROBENIUS_ALERT) {
-    alerts.push(`Frobenius距離が警戒水準超過: ${frobNorm.toFixed(3)} ≥ ${FROBENIUS_ALERT}`);
-  } else if (frobNorm >= FROBENIUS_WARN) {
-    alerts.push(`Frobenius距離が注意水準: ${frobNorm.toFixed(3)} ≥ ${FROBENIUS_WARN}`);
+  if (frobNorm >= FROB_ALERT) alerts.push(`Frobenius距離が警戒水準超過: ${frobNorm.toFixed(3)} >= ${FROB_ALERT}`);
+  else if (frobNorm >= FROB_WARN) alerts.push(`Frobenius距離が注意水準: ${frobNorm.toFixed(3)} >= ${FROB_WARN}`);
+  if (eigenShift >= EIG_ALERT) alerts.push(`第1固有値シフトが警戒水準: ${(eigenShift * 100).toFixed(1)}% >= ${EIG_ALERT * 100}%`);
+  else if (eigenShift >= EIG_WARN) alerts.push(`第1固有値シフトが注意水準: ${(eigenShift * 100).toFixed(1)}% >= ${EIG_WARN * 100}%`);
+  if (angle >= ANGLE_ALERT) alerts.push(`部分空間角度が警戒水準: ${angle.toFixed(1)}deg >= ${ANGLE_ALERT}deg`);
+  else if (angle >= ANGLE_WARN) alerts.push(`部分空間角度が注意水準: ${angle.toFixed(1)}deg >= ${ANGLE_WARN}deg`);
+
+  const grossRR = dailyReturns ? computeGrossRRCheck(dailyReturns) : undefined;
+  if (grossRR?.belowThreshold) {
+    alerts.push(`グロスR/R低下: ${grossRR.rolling3m.toFixed(2)} < ${GROSS_RR_THRESHOLD} (${grossRR.consecutiveMonthsBelow}ヶ月連続)`);
+  }
+  if (grossRR && grossRR.consecutiveMonthsBelow >= GROSS_RR_MONTHS) {
+    alerts.push("Cfull更新検討: グロスR/Rが3ヶ月連続で閾値以下");
   }
 
-  if (eigenShift >= EIGENVALUE_ALERT) {
-    alerts.push(`第1固有値シフトが警戒水準: ${(eigenShift * 100).toFixed(1)}% ≥ ${EIGENVALUE_ALERT * 100}%`);
-  } else if (eigenShift >= EIGENVALUE_WARN) {
-    alerts.push(`第1固有値シフトが注意水準: ${(eigenShift * 100).toFixed(1)}% ≥ ${EIGENVALUE_WARN * 100}%`);
+  const mono = dailyReturns ? computeMonotonicityCheck(dailyReturns) : undefined;
+  if (mono && !mono.monotonic) {
+    alerts.push(`モノトニシティ崩壊: Q5(${mono.q5Alpha.toFixed(1)} bps) < Q1(${mono.q1Alpha.toFixed(1)} bps)`);
   }
 
-  if (angle >= SUBSPACE_ALERT) {
-    alerts.push(`部分空間角度が警戒水準: ${angle.toFixed(1)}° ≥ ${SUBSPACE_ALERT}°`);
-  } else if (angle >= SUBSPACE_WARN) {
-    alerts.push(`部分空間角度が注意水準: ${angle.toFixed(1)}° ≥ ${SUBSPACE_WARN}°`);
-  }
+  const shouldRecal = frobNorm >= FROB_ALERT || eigenShift >= EIG_ALERT || angle >= ANGLE_ALERT
+    || (grossRR !== undefined && grossRR.consecutiveMonthsBelow >= GROSS_RR_MONTHS)
+    || (mono !== undefined && !mono.monotonic);
+  const shouldMon = frobNorm >= FROB_WARN || eigenShift >= EIG_WARN || angle >= ANGLE_WARN
+    || (grossRR?.belowThreshold ?? false);
 
-  // Recommendation
-  let recommendation: CfullDriftReport["recommendation"];
-  if (frobNorm >= FROBENIUS_ALERT || eigenShift >= EIGENVALUE_ALERT || angle >= SUBSPACE_ALERT) {
-    recommendation = "recalibrate";
-  } else if (frobNorm >= FROBENIUS_WARN || eigenShift >= EIGENVALUE_WARN || angle >= SUBSPACE_WARN) {
-    recommendation = "monitor";
-  } else {
-    recommendation = "stable";
-  }
+  const recommendation = shouldRecal ? "recalibrate" : shouldMon ? "monitor" : "stable";
 
   return {
-    date,
-    windowSize: recentReturns.length,
-    frobeniusDistance: frobRaw,
-    frobeniusNormalized: frobNorm,
-    topEigenvalueShift: eigenShift,
-    subspaceAngle: angle,
-    alerts,
-    recommendation,
+    date, windowSize: recentReturns.length, frobeniusDistance: frobRaw,
+    frobeniusNormalized: frobNorm, topEigenvalueShift: eigenShift, subspaceAngle: angle,
+    grossRR, monotonicityCheck: mono, alerts, recommendation,
   };
 }
 
@@ -155,18 +140,20 @@ export function formatDriftReport(report: CfullDriftReport): string[] {
   const lines: string[] = [];
   lines.push(`--- Cfull Drift Monitor (${report.date}) ---`);
   lines.push(`  Window: ${report.windowSize} days`);
-  lines.push(`  Frobenius distance (norm): ${report.frobeniusNormalized.toFixed(4)} [warn:${FROBENIUS_WARN} alert:${FROBENIUS_ALERT}]`);
-  lines.push(`  Top eigenvalue shift:      ${(report.topEigenvalueShift * 100).toFixed(1)}% [warn:${EIGENVALUE_WARN * 100}% alert:${EIGENVALUE_ALERT * 100}%]`);
-  lines.push(`  Subspace angle:            ${report.subspaceAngle.toFixed(1)}° [warn:${SUBSPACE_WARN}° alert:${SUBSPACE_ALERT}°]`);
-
-  const recLabel = report.recommendation === "stable" ? "STABLE"
-    : report.recommendation === "monitor" ? "MONITOR"
-    : "RECALIBRATE";
-  lines.push(`  Recommendation: ${recLabel}`);
-
-  if (report.alerts.length > 0) {
-    for (const a of report.alerts) lines.push(`  ⚠ ${a}`);
+  lines.push(`  Frobenius distance (norm): ${report.frobeniusNormalized.toFixed(4)} [warn:${FROB_WARN} alert:${FROB_ALERT}]`);
+  lines.push(`  Top eigenvalue shift:      ${(report.topEigenvalueShift * 100).toFixed(1)}% [warn:${EIG_WARN * 100}% alert:${EIG_ALERT * 100}%]`);
+  lines.push(`  Subspace angle:            ${report.subspaceAngle.toFixed(1)}deg [warn:${ANGLE_WARN}deg alert:${ANGLE_ALERT}deg]`);
+  if (report.grossRR) {
+    const rr = report.grossRR;
+    const v = Number.isNaN(rr.rolling3m) ? "N/A" : rr.rolling3m.toFixed(2);
+    lines.push(`  Gross R/R (3m):            ${v} [threshold:${GROSS_RR_THRESHOLD}] (${rr.consecutiveMonthsBelow}m below)`);
   }
-
+  if (report.monotonicityCheck) {
+    const mc = report.monotonicityCheck;
+    lines.push(`  Monotonicity (Q5 vs Q1):   ${mc.monotonic ? "OK" : "BROKEN"} — Q5=${mc.q5Alpha.toFixed(1)} bps, Q1=${mc.q1Alpha.toFixed(1)} bps`);
+  }
+  const recLabel = report.recommendation === "stable" ? "STABLE" : report.recommendation === "monitor" ? "MONITOR" : "RECALIBRATE";
+  lines.push(`  Recommendation: ${recLabel}`);
+  if (report.alerts.length > 0) for (const a of report.alerts) lines.push(`  ! ${a}`);
   return lines;
 }

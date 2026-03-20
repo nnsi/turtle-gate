@@ -28,18 +28,26 @@ import {
   orthonormalize,
 } from "./linalg.js";
 
-export interface SignalResult {
+export type IntermediateData = {
+  cregDiag: number[];       // Creg diagonal elements (size reduction)
+  eigenvalues: number[];    // top-K eigenvalues
+  eigenvectors: number[][]; // top-K eigenvectors
+  nTickers: number;         // number of tickers used in this window
+}
+
+export type SignalResult = {
   date: string;
   signals: Record<string, number>;
   longCandidates: string[];
   shortCandidates: string[];
   signalRange: number;
   factorScores: number[];
+  intermediateData?: IntermediateData;
 }
 
 export type ConfidenceBand = "high" | "medium" | "low";
 
-export interface ConfidenceResult {
+export type ConfidenceResult = {
   date: string;
   signalRange: number;
   threshold: number;
@@ -114,51 +122,78 @@ function standardizeWindow(windowData: number[][]): number[][] {
 /**
  * Generate signal for a single date given the rolling window data.
  *
+ * Implements dynamic universe shrinking (§8.1.2): tickers with any NaN in
+ * the window are excluded for that window only (XLC pre-2018, XLRE pre-2015).
+ *
  * @param windowData - (L+1) rows × N columns of CC returns. First L rows are
  *   past data (Wt), last row is "today". Stats are computed from past only.
+ *   May contain NaN for tickers unavailable on certain dates.
  * @param tickers - ordered ticker list matching columns
  * @param params - PCA_SUB parameters
- * @param Cfull - full correlation matrix estimated from long-term data (§8.2.1)
- * @returns signal for each JP ticker
+ * @param Cfull - full correlation matrix estimated from long-term data (§8.2.1),
+ *   sized to match `tickers` (all columns, including potentially unavailable ones).
+ * @returns signal for each JP ticker, or null if insufficient tickers
  */
 export function generateSignalForDate(
   windowData: number[][],
   tickers: string[],
   params: SignalParams,
   Cfull: number[][],
-): { signals: Record<string, number>; factorScores: number[] } {
-  const N = tickers.length;
-  const nUS = tickers.filter((t) => (US_TICKERS as readonly string[]).includes(t)).length;
-  const nJP = N - nUS;
+): { signals: Record<string, number>; factorScores: number[]; intermediateData: IntermediateData } | null {
+  // §8.1.2: Dynamic universe shrinking — keep only tickers with complete data
+  // in both the window AND the Cfull matrix (tickers absent in Cfull estimation
+  // period, e.g. XLC pre-2018, will have NaN on the Cfull diagonal).
+  const validCols: number[] = [];
+  for (let col = 0; col < tickers.length; col++) {
+    // Check Cfull diagonal for NaN (ticker absent in Cfull estimation period)
+    if (isNaN(Cfull[col][col])) continue;
+    let ok = true;
+    for (const row of windowData) {
+      if (row[col] === undefined || isNaN(row[col])) { ok = false; break; }
+    }
+    if (ok) validCols.push(col);
+  }
+
+  const vTickers = validCols.map((c) => tickers[c]);
+  const nUS = vTickers.filter((t) => (US_TICKERS as readonly string[]).includes(t)).length;
+  const nJP = vTickers.length - nUS;
+
+  // Need at least 1 US and 1 JP ticker
+  if (nUS === 0 || nJP === 0) return null;
+
+  // Slice window data to valid columns only
+  const vWindow = windowData.map((row) => validCols.map((c) => row[c]));
+
+  // Slice Cfull to valid columns
+  const vCfull = validCols.map((i) => validCols.map((j) => Cfull[i][j]));
+
+  const N = vTickers.length;
 
   // 1. Standardize: stats from first L rows (past), apply to all L+1 rows
-  const stdData = standardizeWindow(windowData);
+  const stdData = standardizeWindow(vWindow);
 
   // 2. Compute sample correlation matrix Ct from past data only (exclude today)
   const stdPast = stdData.slice(0, stdData.length - 1);
   const Ct = correlationMatrix(stdPast);
 
   // 3. Build prior subspace and C0 using Cfull (paper equations 10-12)
-  const priorVecs = buildPriorSubspace(tickers);
-  const C0 = priorCorrelationFromSubspace(priorVecs, Cfull);
+  const priorVecs = buildPriorSubspace(vTickers);
+  const C0 = priorCorrelationFromSubspace(priorVecs, vCfull);
 
   // 4. Regularize: Creg = (1-λ)Ct + λC0
   const Creg = regularizeCorrelation(Ct, C0, params.lambda);
 
   // 5. Top-K eigenvectors
-  const { vectors } = topKEigenvectors(Creg, params.K);
+  const { values: eigenvalues, vectors } = topKEigenvectors(Creg, params.K);
 
   // 6. Split into US / JP blocks
-  // vectors[k] is full N-dim eigenvector. US part = first nUS elements, JP part = rest.
   const usLoadings = vectors.map((v) => v.slice(0, nUS));
   const jpLoadings = vectors.map((v) => v.slice(nUS));
 
   // 7. Extract factor scores from today's US returns
-  // Today's standardized US returns
   const todayStd = stdData[stdData.length - 1];
   const todayUS = todayStd.slice(0, nUS);
 
-  // Factor score for each component k: f_k = sum_i(usLoading_k_i * todayUS_i)
   const factorScores = usLoadings.map((loading) =>
     loading.reduce((s, w, i) => s + w * todayUS[i], 0),
   );
@@ -172,13 +207,21 @@ export function generateSignalForDate(
   }
 
   // Map to JP tickers
-  const jpTickers = tickers.slice(nUS);
+  const jpTickers = vTickers.slice(nUS);
   const signals: Record<string, number> = {};
   for (let j = 0; j < nJP; j++) {
     signals[jpTickers[j]] = jpSignals[j];
   }
 
-  return { signals, factorScores };
+  // §14: Intermediate data
+  const intermediateData: IntermediateData = {
+    cregDiag: Array.from({ length: N }, (_, i) => Creg[i][i]),
+    eigenvalues,
+    eigenvectors: vectors,
+    nTickers: N,
+  };
+
+  return { signals, factorScores, intermediateData };
 }
 
 /**
@@ -235,13 +278,10 @@ export function generateSignals(
     // L+1 rows: past L days [t-L, ..., t-1] + today [t]
     const windowData = matrix.slice(t - params.L, t + 1);
 
-    const { signals, factorScores } = generateSignalForDate(
-      windowData,
-      tickers,
-      params,
-      Cfull,
-    );
+    const result = generateSignalForDate(windowData, tickers, params, Cfull);
+    if (!result) continue; // skip if insufficient tickers (§8.1.2)
 
+    const { signals, factorScores, intermediateData } = result;
     const { longCandidates, shortCandidates } = selectCandidates(signals, params.q);
     const signalRange = computeSignalRange(signals, longCandidates, shortCandidates);
 
@@ -252,6 +292,7 @@ export function generateSignals(
       shortCandidates,
       signalRange,
       factorScores,
+      intermediateData,
     });
   }
 

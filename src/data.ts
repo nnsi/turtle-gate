@@ -5,20 +5,20 @@
 import * as fs from "node:fs";
 import { US_TICKERS, JP_TICKERS } from "./config.js";
 
-export interface PriceRow {
+export type PriceRow = {
   date: string;       // YYYY-MM-DD
   ticker: string;
   close: number;
   open?: number;
 }
 
-export interface ReturnRow {
+export type ReturnRow = {
   date: string;
   ticker: string;
   ret: number;        // close-to-close log return
 }
 
-export interface OCReturnRow {
+export type OCReturnRow = {
   date: string;
   ticker: string;
   ret: number;        // open-to-close simple return: close/open - 1
@@ -202,11 +202,16 @@ function computeReturns(prices: PriceRow[]): ReturnRow[] {
 /**
  * Build a date-aligned return matrix.
  * Returns: { dates, tickers, matrix } where matrix[t][i] = return of ticker i on date t.
- * Only dates where ALL tickers have data are included.
+ *
+ * @param sparse - if true, include dates where at least one (but not all) ticker
+ *   has data, filling missing values with NaN. This enables dynamic universe
+ *   shrinking in signal generation (§8.1.2: XLC/XLRE availability).
+ *   Default false preserves legacy behavior (only complete rows).
  */
 export function buildReturnMatrix(
   returns: ReturnRow[],
   tickers: string[],
+  sparse = false,
 ): { dates: string[]; tickers: string[]; matrix: number[][] } {
   const byDate = new Map<string, Map<string, number>>();
   for (const r of returns) {
@@ -224,9 +229,18 @@ export function buildReturnMatrix(
 
   for (const d of allDates) {
     const m = byDate.get(d)!;
-    if (tickers.every((t) => m.has(t))) {
-      validDates.push(d);
-      matrix.push(tickers.map((t) => m.get(t)!));
+    if (sparse) {
+      // Include date if at least one ticker has data
+      if (tickers.some((t) => m.has(t))) {
+        validDates.push(d);
+        matrix.push(tickers.map((t) => m.get(t) ?? NaN));
+      }
+    } else {
+      // Legacy: only dates where ALL tickers have data
+      if (tickers.every((t) => m.has(t))) {
+        validDates.push(d);
+        matrix.push(tickers.map((t) => m.get(t)!));
+      }
     }
   }
 
@@ -271,7 +285,7 @@ export async function fetchAllData(
 
   const allReturns = computeReturns(allPrices);
 
-  // Dynamic universe: exclude tickers with insufficient data
+  // Dynamic universe: exclude tickers with no data at all
   const allTickers = [...US_TICKERS, ...JP_TICKERS] as unknown as string[];
   const activeTickers = allTickers.filter((t) =>
     allReturns.some((r) => r.ticker === t),
@@ -279,5 +293,8 @@ export async function fetchAllData(
 
   console.log(`Active universe: ${activeTickers.length} tickers`);
 
-  return buildReturnMatrix(allReturns, activeTickers);
+  // Sparse mode (§8.1.2) fills NaN for missing tickers instead of dropping dates,
+  // enabling per-window dynamic universe shrinking in generateSignalForDate().
+  // Callers that compute Cfull must handle NaN columns appropriately.
+  return buildReturnMatrix(allReturns, activeTickers, true);
 }

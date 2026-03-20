@@ -43,7 +43,7 @@ export const JP_CYCLICAL = ["1618.T", "1625.T", "1629.T", "1631.T"];
 export const JP_DEFENSIVE = ["1617.T", "1621.T", "1627.T", "1630.T"];
 
 /** PCA_SUB parameters */
-export interface SignalParams {
+export type SignalParams = {
   /** Rolling window length in business days */
   L: number;
   /** Number of principal components */
@@ -109,3 +109,19 @@ export const POST_OPEN_CHECK_TIME = "09:10";
 
 /** 異常値判定の前日比ギャップ閾値 (§8.4.1) */
 export const ANOMALY_GAP_THRESHOLD = 0.05;
+
+/** 流動性チェック: 最良気配の最小株数 (§8.4.1, Level2板情報が必要) */
+export const MIN_DEPTH_SHARES = 100;
+
+/** 1ポジションあたりの想定金額 (JPY, §8.8) */
+export const POSITION_SIZE_JPY = 1_000_000;
+
+/** 売買総額上限 (JPY, §12.1) */
+export const MAX_TOTAL_POSITION_JPY = 10_000_000;
+
+/** ロング/ショート偏り上限 (§12.1: 片側の銘柄数上限) */
+export const MAX_SIDE_COUNT = 5;
+
+/** 手仕舞い時刻帯 (JST, §8.9: 14:50–15:00) */
+export const UNWIND_START_TIME = "14:50";
+export const UNWIND_END_TIME = "15:00";

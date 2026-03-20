@@ -12,15 +12,15 @@
 
 | 要件 | 状態 | 実装箇所 | 備考 |
 |------|------|---------|------|
-| 8.1.1 米国セクターETF 11銘柄取得 | ◯ | `src/config.ts:7-9` US_TICKERS | XLB～XLY |
-| 8.1.1 日本TOPIX-17 ETF取得 | ◯ | `src/config.ts:12-16` JP_TICKERS | 1617.T～1633.T |
-| 8.1.1 米国主要指数・金利・為替等 | ◯ | `src/market-context.ts` | SPY, VIX, US10Y, USDJPY, DXY。check-marketで表示、LLMプロンプトに注入 |
-| 8.1.1 ニュース・経済情報（LLM入力用） | ◯ | `src/news.ts` fetchMarketNews | Finnhub(EN)+Google News RSS(JP)。LLMプロンプトに注入 |
-| 8.1.2 取得失敗時リトライ | ◯ | `src/data.ts:130` fetchTickerPrices | 最大3回リトライ |
-| 8.1.2 データ欠損検知・当日見送り | ◯ | `src/data.ts:207` buildReturnMatrix | 全銘柄揃う日のみ採用 |
-| 8.1.2 過去60営業日ローリングウィンドウ保持 | ◯ | `src/signal.ts:216` generateSignals | L=60のウィンドウでスライス |
-| 8.1.2 XLC/XLRE動的ユニバース縮小 | ◯ | `src/data.ts:239` fetchAllData | データ存在銘柄のみで構成 |
-| CSV入力対応 | ◯ | `src/data.ts:31` loadClosesFromCsv | scripts/fetch-data.py で事前取得 |
+| 8.1.1 米国セクターETF 11銘柄取得 | ◯ | `src/config.ts` US_TICKERS | XLB～XLY |
+| 8.1.1 日本TOPIX-17 ETF取得 | ◯ | `src/config.ts` JP_TICKERS | 1617.T～1633.T |
+| 8.1.1 米国主要指数・金利・為替等 | ◯ | `src/market-context.ts` | SPY, VIX, US10Y, USDJPY, DXY |
+| 8.1.1 ニュース・経済情報（LLM入力用） | ◯ | `src/news.ts` fetchMarketNews | Finnhub(EN)+Google News RSS(JP) |
+| 8.1.1 寄り前・寄り後の板情報 | ◯ | `src/broker.ts` getLevel2Quotes, `src/check-market.ts` | BrokerPort経由。BBOスナップショット保存 |
+| 8.1.2 取得失敗時リトライ | ◯ | `src/data.ts` fetchTickerPrices | 最大3回リトライ |
+| 8.1.2 データ欠損検知・当日見送り | ◯ | `src/data.ts` buildReturnMatrix | sparse mode対応 |
+| 8.1.2 過去60営業日ローリングウィンドウ保持 | ◯ | `src/signal.ts` generateSignals | L=60 |
+| 8.1.2 XLC/XLRE動的ユニバース縮小 | ◯ | `src/signal.ts` generateSignalForDate | ウィンドウ内NaN/Cfull欠損ティッカーを動的除外 |
 
 ---
 
@@ -28,24 +28,13 @@
 
 | 要件 | 状態 | 実装箇所 | 備考 |
 |------|------|---------|------|
-| 8.2.1 ローリングウィンドウ内標準化 | ◯ | `src/signal.ts:83` standardizeWindow | z = (x - mean) / std |
-| 8.2.1 結合相関行列 Ct 計算 | ◯ | `src/linalg.ts:9` correlationMatrix | 28×28 相関行列 |
-| 8.2.1 事前部分空間構成 (v1,v2,v3) | ◯ | `src/signal.ts:51` buildPriorSubspace | グローバル/国スプレッド/シクリカル-ディフェンシブ |
-| 8.2.1 シクリカル/ディフェンシブ分類 | ◯ | `src/config.ts:40-43` | 要求定義書通りの分類 |
-| 8.2.1 Gram-Schmidt直交化 | ◯ | `src/linalg.ts:137` orthonormalize | v1,v2,v3 を直交正規化 |
-| 8.2.1 事前相関行列 C0 = V@V^T | ◯ | `src/linalg.ts:76` priorCorrelationFromSubspace | 射影行列として構成 |
-| 8.2.1 正則化 Creg = (1-λ)Ct + λC0 | ◯ | `src/linalg.ts:53` regularizeCorrelation | λ=0.9 |
-| 8.2.1 上位K=3固有ベクトル抽出 | ◯ | `src/linalg.ts:114` topKEigenvectors | mathjs eigs使用 |
-| 8.2.1 US/JPブロック分割 | ◯ | `src/signal.ts:118` generateSignalForDate | nUS/nJP で分割 |
-| 8.2.1 ファクタースコア抽出 | ◯ | `src/signal.ts:118` | US当日リターン × USローディング |
-| 8.2.1 JPシグナル復元 | ◯ | `src/signal.ts:118` | ファクタースコア × JPローディング |
-| 8.2.1 上位30%ロング/下位30%ショート | ◯ | `src/signal.ts:181` selectCandidates | q=0.3 |
-| 8.2.2 17業種シグナル出力 | ◯ | `src/signal.ts:118` | Record<ticker, signal> |
-| 8.2.2 ロング/ショート候補リスト | ◯ | `src/signal.ts:181` selectCandidates | |
-| 8.2.2 シグナルレンジ出力 | ◯ | `src/signal.ts:199` computeSignalRange | Long平均 − Short平均 |
-| Cfull更新ポリシー | ◯ | `src/cfull-monitor.ts` | Frobenius距離・固有値シフト・部分空間角度の3指標で監視。stable/monitor/recalibrate判定 |
-| 8.2.3 パラメータ外部設定 (L,K,λ,q) | ◯ | `src/config.ts:46,59` SignalParams / DEFAULT_PARAMS | CLI引数でも一部変更可能 |
-| 8.2.3 同一入力→同一出力の再現性 | ◯ | — | 乱数不使用。決定的計算 |
+| 8.2.1 PCA_SUB全ステップ | ◯ | `src/signal.ts`, `src/linalg.ts` | 標準化→Ct→C0→正則化→固有値→ファクタースコア→シグナル復元 |
+| 8.2.1 事前部分空間 (v1,v2,v3) | ◯ | `src/signal.ts` buildPriorSubspace | グローバル/国スプレッド/シクリカル-ディフェンシブ |
+| 8.2.1 上位30%ロング/下位30%ショート | ◯ | `src/signal.ts` selectCandidates | q=0.3 |
+| 8.2.1 Cfull更新ポリシー | ◯ | `src/cfull-monitor.ts` | Frobenius距離/固有値シフト/部分空間角度 + R/R 3ヶ月連続<0.5 + Q5<Q1モノトニシティ崩壊 |
+| 8.2.2 中間データ保存 (§14) | ◯ | `src/signal.ts` IntermediateData | Creg対角/固有値/固有ベクトル/使用銘柄数をSignalResultに含む |
+| 8.2.3 パラメータ外部設定 | ◯ | `src/config.ts` SignalParams | CLI引数で変更可能 |
+| 8.2.3 再現性 | ◯ | — | 乱数不使用。決定的計算 |
 
 ---
 
@@ -53,13 +42,9 @@
 
 | 要件 | 状態 | 実装箇所 | 備考 |
 |------|------|---------|------|
-| 8.3.3 シグナルレンジ計算 | ◯ | `src/signal.ts:199` computeSignalRange | |
-| 8.3.3 拡張ウィンドウ方式パーセンタイル閾値 | ◯ | `src/signal.ts:259` applyConfidenceFilter | 各日時点で過去データのみ使用 |
-| 8.3.3 P90閾値による高確信バンド判定 | ◯ | `src/signal.ts` applyDualBandFilter | P90以上→high band |
-| 8.3.3 P80閾値による中確信バンド判定 | ◯ | `src/signal.ts` applyDualBandFilter | P80-P89→medium band |
-| 8.3.3 低確信（P80未満）自動見送り | ◯ | `src/signal.ts` applyDualBandFilter | P80未満→low band→自動見送り |
-| 8.3.4 閾値設定可能（P80/P90の組合せ変更） | ◯ | `src/generate-signal.ts` | --percentile, --percentile-low CLI引数で両方変更可 |
-| 8.3.4 バンド判定結果・シグナルレンジ・閾値の保存 | ◯ | `src/generate-signal.ts:155` | JSON内にconfidence含む |
+| 8.3.3 P90/P80デュアルバンド判定 | ◯ | `src/signal.ts` applyDualBandFilter | 拡張ウィンドウ方式（look-ahead回避） |
+| 8.3.4 閾値設定可能 | ◯ | `src/generate-signal.ts` | --percentile, --percentile-low |
+| 8.3.4 バンド判定結果保存 | ◯ | `src/generate-signal.ts` | signals.json に confidence 含む |
 
 ---
 
@@ -67,12 +52,13 @@
 
 | 要件 | 状態 | 実装箇所 | 備考 |
 |------|------|---------|------|
-| 8.4.1 BBOスプレッド判定（09:10時点） | △ | `src/mechanical-filter.ts:68` checkTicker | JPX基準値×ストレス倍率。bid/ask取得時は実測値優先。真のLevel2板情報は証券会社API要 |
-| 8.4.1 流動性条件 | ✕ | — | リアルタイム板情報が必要 |
-| 8.4.1 異常値・売買停止検出 | ◯ | `src/mechanical-filter.ts:91` | 前日比5%超→異常値、出来高0→取引停止。閾値は設定可 |
-| 8.4.1 直近急変動検出 | ◯ | `src/realtime.ts:161` detectRecentVolatility | 1分足bars活用、直近10分の最大swing判定 |
-| 8.4.2 銘柄別スプレッド基準値 | ◯ | `src/config.ts:75` BBO_SPREAD_THRESHOLDS | JPX月次データ17銘柄別に設定済み |
-| 8.4.3 見送り理由保存 | ◯ | `src/mechanical-filter.ts` FilterResult.reasons | 複数理由を配列で保持。market-check.jsonに保存 |
+| 8.4.1 BBOスプレッド判定 | ◯ | `src/mechanical-filter.ts` checkTicker | Level2→bid_ask→JPX基準の3段フォールバック |
+| 8.4.1 流動性条件 | ◯ | `src/mechanical-filter.ts` | Level2板厚み判定。BrokerPort経由 |
+| 8.4.1 異常値・売買停止検出 | ◯ | `src/mechanical-filter.ts` | 前日比5%超→異常値、出来高0→停止 |
+| 8.4.1 直近急変動検出 | ◯ | `src/realtime.ts` detectRecentVolatility | 直近10分max swing |
+| 8.4.2 銘柄別スプレッド基準値 | ◯ | `src/config.ts` BBO_SPREAD_THRESHOLDS | JPX月次17銘柄別 |
+| 8.4.3 09:10 BBO記録 | ◯ | `src/check-market.ts` bboSnapshot | タイムスタンプ付きBBOスナップショットをJSON保存 |
+| 8.4.3 見送り理由保存 | ◯ | `src/mechanical-filter.ts` FilterResult.reasons | 配列で保持 |
 
 ---
 
@@ -80,12 +66,12 @@
 
 | 要件 | 状態 | 実装箇所 | 備考 |
 |------|------|---------|------|
-| 8.5.1 中確信バンド（P80-P89）のみLLM審査 | ◯ | `src/trade-decision.ts` makeTradeDecision | medium bandのみLLM呼び出し |
-| 8.5.2 ニュース要約・セクター関連性判定 | ◯ | `src/news.ts`, `src/llm.ts` | Finnhub(EN) + Google News RSS(JP)の2段構成。LLMプロンプトに注入 |
-| 8.5.2 イベント支配日の判定補助 | ◯ | `src/news.ts`, `src/llm.ts` | 直近24hニュースをLLMに提供。イベント判断はLLMに委任 |
-| 8.5.3 高確信バンドの自動通過を覆さない | ◯ | `src/trade-decision.ts` | high band→LLMスキップ→自動通過 |
-| 8.5.5 判定カテゴリ出力（追い風/中立/逆風/無効） | ◯ | `src/llm.ts` LLMJudgment | tailwind/neutral/headwind/invalid |
-| 8.5.6 構造化出力（JSON） | ◯ | `src/llm.ts` LLMResult | JSON構造化出力。sectorNotes含む |
+| 8.5.1 中確信バンドのみLLM審査 | ◯ | `src/trade-decision.ts` | medium bandのみLLM呼び出し |
+| 8.5.2 ニュース要約・セクター関連性 | ◯ | `src/news.ts`, `src/llm.ts` | Finnhub+Google News RSS |
+| 8.5.2 イベント支配日の判定補助 | ◯ | `src/llm.ts` | eventDominanceフラグでLLMが判定 |
+| 8.5.5 出力: 判定カテゴリ+理由+ニュース要約+リスク+イベント支配 | ◯ | `src/llm.ts` LLMResult | judgment/summary/newsSummary/riskFactors/eventDominance |
+| 8.5.6 構造化JSON出力 | ◯ | `src/llm.ts` | mock/OpenRouter両対応 |
+| 8.5.6 入力と出力の追跡可能 | ◯ | `src/llm.ts` LLMResult.rawPrompt | プロンプト全文+rawResponse保存 |
 
 ---
 
@@ -93,11 +79,11 @@
 
 | 要件 | 状態 | 実装箇所 | 備考 |
 |------|------|---------|------|
-| 8.6.1 高確信バンド → 自動通過 → 機械フィルター → 執行 | ◯ | `src/trade-decision.ts` | high→auto-pass, normal size |
-| 8.6.1 中確信バンド → LLM審査 → サイズ決定 | ◯ | `src/trade-decision.ts` | medium→LLM→tailwind:normal/neutral:half/headwind:skip |
-| 8.6.1 低確信 → 見送り | ◯ | `src/trade-decision.ts` | low→skip |
-| 8.6.2 見送り理由記録 | ◯ | `src/trade-decision.ts` | TradeDecision.skipReason |
-| 8.6.2 サイズ決定ロジック（通常/半サイズ）保存 | ◯ | `src/trade-decision.ts` | TradeDecision.size/sizeMultiplier, signals.jsonに保存 |
+| 8.6.1 高確信→自動通過→執行 | ◯ | `src/trade-decision.ts` | normal size |
+| 8.6.1 中確信→LLM→サイズ決定 | ◯ | `src/trade-decision.ts` | tailwind:1.0/neutral:0.5/headwind:skip |
+| 8.6.1 低確信→見送り | ◯ | `src/trade-decision.ts` | skip |
+| 8.6.1 全体イベント支配→当日全停止 | ◯ | `src/trade-decision.ts` | eventDominance=true→全停止（§11.3） |
+| 8.6.2 見送り理由・サイズ決定保存 | ◯ | `src/trade-decision.ts` | skipReason/size/sizeMultiplier |
 
 ---
 
@@ -105,12 +91,10 @@
 
 | 要件 | 状態 | 実装箇所 | 備考 |
 |------|------|---------|------|
-| 8.7.1 基準時刻09:10（設定変更可能） | ◯ | `src/config.ts` POST_OPEN_CHECK_TIME, `src/post-open-check.ts:95` | CLI --check-time で変更可能。時間外実行時は警告表示 |
-| 8.7.2 寄り後の方向維持確認 | ◯ | `src/post-open-check.ts:34` checkDirection | シグナル方向 vs 始値比を判定。方向不一致時はスキップ推奨 |
-| 8.7.2 BBOスプレッド確認（基準値3倍超でスキップ） | ◯ | `src/mechanical-filter.ts:85` | 銘柄別baseline×SPREAD_EMERGENCY_MULTIPLIER |
-| 8.7.2 板の安定性・急変動の有無 | ◯ | `src/realtime.ts:161` detectRecentVolatility | 1分足barsで直近10分のmax swing判定 |
-| 8.8 発注機能 | ✕ | — | 初期段階では発注指示生成まで |
-| 8.9 手仕舞い機能（14:50-15:00） | ✕ | — | |
+| 8.7.1-8.7.2 寄り後確認 | ◯ | `src/post-open-check.ts` | 方向維持/BBO/急変動 |
+| 8.8 発注機能 | ◯ | `src/execute.ts` | BrokerPort.placeOrder。売買量制御(§12.1)付き |
+| 8.9 手仕舞い（14:50-15:00） | ◯ | `src/unwind.ts` | closeAllPositions。時刻帯チェック+--force |
+| 8.9 非取引日フラットポジション | ◯ | `src/unwind.ts` checkNonTradeDay | skip日にポジション残存→自動手仕舞い |
 
 ---
 
@@ -118,12 +102,96 @@
 
 | 要件 | 状態 | 実装箇所 | 備考 |
 |------|------|---------|------|
-| 8.10.1 シグナル生成結果保存 | ◯ | `src/generate-signal.ts:155` | output/signals.json |
-| 8.10.1 バンド判定結果保存 | ◯ | `src/generate-signal.ts` | P80/P90デュアルバンド判定をband/thresholdHigh/thresholdLowとして保存 |
-| 8.10.1 人間可読ログ | ◯ | `src/generate-signal.ts:163` | output/latest-signal.txt |
-| 8.10.1 機械可読ログ | ◯ | `src/generate-signal.ts:155` | output/signals.json |
-| 8.10.1 LLM入出力（中確信バンドのみ） | ◯ | `src/generate-signal.ts`, `src/llm.ts` | latestDecision.llmResultとしてJSONに保存 |
-| 8.10.1 発注・約定・手仕舞い結果 | ✕ | — | 該当機能が未実装 |
+| 8.10.1 シグナル・バンド・LLM入出力保存 | ◯ | `src/generate-signal.ts` | signals.json (intermediateData/rawPrompt含む) |
+| 8.10.1 機械フィルター結果保存 | ◯ | `src/check-market.ts` | market-check.json (bboSnapshot含む) |
+| 8.10.1 発注・手仕舞い結果保存 | ◯ | `src/execute.ts`, `src/unwind.ts` | execution/unwind-results.json |
+| 8.10.1 人間可読ログ | ◯ | `src/format-signal.ts` | latest-signal.txt |
+
+---
+
+## §9 非機能要件
+
+| 要件 | 状態 | 実装箇所 | 備考 |
+|------|------|---------|------|
+| 9.5 LLM応答異常→中確信全見送り | ◯ | `src/trade-decision.ts` | try-catch→skip。高確信は影響なし |
+
+---
+
+## §11 判定設計方針
+
+| 要件 | 状態 | 実装箇所 | 備考 |
+|------|------|---------|------|
+| 11.3 イベント支配→高確信含む全停止 | ◯ | `src/llm.ts` eventDominance, `src/trade-decision.ts` | LLMがeventDominance=true→全停止フラグ伝播 |
+
+---
+
+## §12 リスク管理要件
+
+| 要件 | 状態 | 実装箇所 | 備考 |
+|------|------|---------|------|
+| 12.1 売買量制御 | ◯ | `src/execute.ts`, `src/config.ts` | POSITION_SIZE_JPY=1M, MAX_TOTAL=10M, MAX_SIDE_COUNT=5 |
+| 12.3 累積コスト計算 | ◯ | `src/monitor.ts` cumulativeReturn | gross/net追跡 |
+| 12.3 月次スプレッド監視→P85/P95引上げ | ◯ | `src/monitor.ts` spreadMonitor | 12ヶ月平均>10bps→shouldUpgrade=true |
+| 12.4 運用停止条件 | ◯ | `src/monitor.ts` | 累積リターン連続20営業日マイナス→halt |
+
+---
+
+## §13 LLM利用方針
+
+| 要件 | 状態 | 実装箇所 | 備考 |
+|------|------|---------|------|
+| 13.3 LLM判定品質評価 | ◯ | `src/monitor.ts` llmQuality | 通過日α>15bps, 除外日α<10bps, 差>5bps |
+| 13.3 品質基準未達→LLM無効化 | ◯ | `src/monitor.ts` | meetsThreshold=false→disable_llm推奨 |
+
+---
+
+## §14 データ保存要件
+
+| 要件 | 状態 | 実装箇所 | 備考 |
+|------|------|---------|------|
+| 中間データ（相関行列・固有ベクトル） | ◯ | `src/signal.ts` IntermediateData | signals.jsonに保存 |
+| LLM入出力追跡 | ◯ | `src/llm.ts` rawPrompt/rawResponse | signals.json経由 |
+
+---
+
+## §15 バックテスト・検証要件
+
+| 要件 | 状態 | 実装箇所 | 備考 |
+|------|------|---------|------|
+| 15.1 コスト控除前後の成績 | ◯ | `src/backtest-report.ts` | 0/3/5/8/10/15 bps |
+| 15.1 高確信/中確信バンド別単体成績 | ◯ | `src/backtest-report.ts` | applyDualBandFilter使用。HIGH/MEDIUM/Combined |
+| 15.1 五分位分析（サブ期間別） | ◯ | `src/backtest-analysis.ts` | 3期間 |
+| 15.1 OOS検証 | ◯ | `src/backtest-analysis.ts` | IS:2015-2019→OOS:2020-2025 |
+| 15.1 逆選択検証 | ◯ | `src/backtest-analysis.ts` | |return|をproxy spread、High/All・Trade/All比+Welch t検定 |
+| 15.1 年次パフォーマンス + OC/CC比率 | ◯ | `src/backtest-analysis.ts` | 年次別OC/CC Ratio列 |
+| 15.1 アルファ減衰（Day 1-10） | ◯ | `src/backtest-analysis.ts` | |
+
+---
+
+## §17 想定画面・出力イメージ
+
+| 要件 | 状態 | 実装箇所 | 備考 |
+|------|------|---------|------|
+| 17.1 日次判定レポート | ◯ | `src/daily-report.ts` | signals+market-check+execution+unwind統合。daily-report-YYYY-MM-DD.json |
+| 17.2 運用監視 | ◯ | `src/monitor.ts` computeMonitorReport | バンド別通過率/LLM品質/累積リターン/異常検知 |
+
+---
+
+## §19 初期リリース範囲
+
+| 要件 | 状態 | 実装箇所 | 備考 |
+|------|------|---------|------|
+| 19.2 ゲート条件 G1-G4 | ◯ | `src/gate.ts` checkGates | G1:スプレッド/G2:ライブ乖離/G3:ペーパートレード/G4:安定性 |
+| 19.3 段階的フォワード Phase 1-4 | ◯ | `src/gate.ts` getPhaseConfig, shouldAdvancePhase | paper→p90_only→p90_plus_llm→normal |
+| 19.3 Phase統合 | ◯ | `src/generate-signal.ts` | --phase CLI + PHASE env var。Phase別にpercentile/LLM自動制御 |
+
+---
+
+## 付録D
+
+| 要件 | 状態 | 実装箇所 | 備考 |
+|------|------|---------|------|
+| D.3 Q5 < Q1 → 取引停止 | ◯ | `src/monitor.ts`, `src/cfull-monitor.ts` | 60日ローリングQ5/Q1 + monotonicityCheck |
 
 ---
 
@@ -131,10 +199,13 @@
 
 | ファイル | 内容 | 対応要件 |
 |---------|------|---------|
-| `output/signals.json` | 全日シグナル＋確信度フィルター結果 | 8.2.2, 8.3.4, 8.10 |
-| `output/latest-signal.txt` | 直近日のシグナルレポート（人間可読） | 8.10, 17.1 |
+| `output/signals.json` | 全日シグナル＋確信度＋中間データ＋LLM入出力 | 8.2, 8.3, 8.10, 14 |
+| `output/latest-signal.txt` | 直近日シグナルレポート（人間可読） | 8.10, 17.1 |
 | `output/trade-days.txt` | 取引候補日一覧 | 8.3.4 |
-| `output/market-check.json` | リアルタイム気配＋機械フィルター結果 | 8.4, 8.7, 8.10 |
+| `output/market-check.json` | 気配＋機械フィルター＋BBOスナップショット | 8.4, 8.7, 8.10 |
+| `output/execution-results.json` | 発注結果 | 8.8, 8.10 |
+| `output/unwind-results.json` | 手仕舞い結果 | 8.9, 8.10 |
+| `output/daily-report-YYYY-MM-DD.json` | 日次統合レポート | 17.1 |
 
 ---
 
@@ -142,33 +213,45 @@
 
 | パラメータ | 要求値 | 実装値 | 定義箇所 |
 |----------|-------|-------|---------|
-| L (ローリングウィンドウ) | 60 | 60 | `src/config.ts:59` |
-| K (主成分数) | 3 | 3 | `src/config.ts:59` |
-| λ (正則化) | 0.9 | 0.9 | `src/config.ts:59` |
-| q (ロング/ショート閾値) | 0.3 | 0.3 | `src/config.ts:59` |
-| 確信度パーセンタイル（高確信） | P90 | P90 (変更可) | `src/config.ts:59`, CLI --percentile |
-| 確信度パーセンタイル（中確信下限） | P80 | P80 (変更可) | `src/config.ts` confidencePercentileLow, CLI --percentile-low |
+| L (ローリングウィンドウ) | 60 | 60 | `src/config.ts` |
+| K (主成分数) | 3 | 3 | `src/config.ts` |
+| λ (正則化) | 0.9 | 0.9 | `src/config.ts` |
+| q (ロング/ショート閾値) | 0.3 | 0.3 | `src/config.ts` |
+| 確信度パーセンタイル（高） | P90 | P90 (変更可) | CLI --percentile |
+| 確信度パーセンタイル（中下限） | P80 | P80 (変更可) | CLI --percentile-low |
+| 1ポジション金額 | — | ¥1,000,000 | `src/config.ts` POSITION_SIZE_JPY |
+| 売買総額上限 | — | ¥10,000,000 | `src/config.ts` MAX_TOTAL_POSITION_JPY |
+| 片側銘柄数上限 | — | 5 | `src/config.ts` MAX_SIDE_COUNT |
 
 ---
 
-## 実装カバレッジサマリ
+## ソースファイル一覧
 
-| カテゴリ | 実装済み | 部分実装 | 未実装 | カバー率 |
-|---------|---------|---------|-------|---------|
-| 8.1 市場データ取得 | 7 | 0 | 0 | 100% |
-| 8.2 シグナル生成 (PCA_SUB) | 16 | 0 | 0 | 100% |
-| 8.3 デュアルバンド確信度判定 | 6 | 0 | 0 | 100% |
-| 8.4 一次機械フィルター | 4 | 1 | 1 | 75% |
-| 8.5 LLM情報整理・信用判定 | 6 | 0 | 0 | 100% |
-| 8.6 最終売買判定 | 5 | 0 | 0 | 100% |
-| 8.7-8.9 執行系 | 4 | 0 | 2 | 67% |
-| 8.10 ログ・監査 | 5 | 0 | 1 | 83% |
-| **合計** | **53** | **1** | **4** | **93%** |
-
-> シグナル生成のコアロジック（8.1～8.2）はほぼ完全に実装済み。
-> 8.3 確信度フィルターはP80/P90デュアルバンドで動作。CLI引数で両方変更可能。
-> 8.4 一次機械フィルターはYahoo Finance APIによるリアルタイムデータ取得＋JPXスプレッド基準値＋ストレス倍率で動作。急変動検知・方向維持チェック実装済み。真のLevel2板情報（BBO）は証券会社APIが必要。
-> 8.5 LLM判定はmockプロバイダーで動作。OpenRouter経由での本番LLM利用は`LLM_PROVIDER=openrouter`で切替可能。ニュースはFinnhub(EN)+Google News RSS(JP)の2段構成で取得しLLMプロンプトに注入。
-> 8.6 最終売買判定はデュアルバンド→LLM→サイズ決定の全フローを実装。§8.4機械フィルターとの統合はcheck-market.tsで実現。
-> 8.7 寄り後確認は方向維持チェック・時刻警告・急変動検知を実装。§8.4と論理分離済み。
-> 未実装部分は主に発注・手仕舞い系と外部ニュースAPI連携に集中している。
+| ファイル | 行数 | 役割 |
+|---------|------|------|
+| `src/config.ts` | 127 | 設定・定数 |
+| `src/data.ts` | 300 | データ取得・CSV読込 |
+| `src/linalg.ts` | 150 | 線形代数（相関行列・固有値） |
+| `src/signal.ts` | 419 | PCA_SUBシグナル生成・確信度フィルター |
+| `src/realtime.ts` | 170 | Yahoo Finance リアルタイム取得 |
+| `src/mechanical-filter.ts` | 176 | 一次機械フィルター |
+| `src/post-open-check.ts` | 121 | 寄り後価格確認 |
+| `src/llm.ts` | 275 | LLM判定（mock/OpenRouter） |
+| `src/news.ts` | 212 | ニュース取得（Finnhub/Google RSS） |
+| `src/market-context.ts` | 144 | 米国指標取得 |
+| `src/trade-decision.ts` | 210 | 最終売買判定 |
+| `src/broker.ts` | 109 | BrokerPort（DI境界） |
+| `src/broker-mock.ts` | 145 | Mock broker |
+| `src/broker-kabu.ts` | 171 | kabu Station adapter |
+| `src/execute.ts` | 171 | 発注CLI（§8.8） |
+| `src/unwind.ts` | 133 | 手仕舞いCLI（§8.9） |
+| `src/monitor.ts` | 167 | 運用監視（§12/§13/§17.2/D.3） |
+| `src/gate.ts` | 166 | ゲート条件・フェーズ管理（§19） |
+| `src/cfull-monitor.ts` | 159 | Cfullドリフト+R/R+モノトニシティ |
+| `src/daily-report.ts` | 196 | 日次統合レポート（§17.1） |
+| `src/generate-signal.ts` | 165 | シグナル生成CLI（エントリーポイント） |
+| `src/format-signal.ts` | 64 | シグナルレポートフォーマッタ |
+| `src/check-market.ts` | 199 | 市場チェックCLI |
+| `src/backtest.ts` | 215 | バックテストCLI |
+| `src/backtest-report.ts` | 190 | バックテスト成績レポート |
+| `src/backtest-analysis.ts` | 231 | 五分位・逆選択・年次分析 |

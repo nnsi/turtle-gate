@@ -1,35 +1,32 @@
 #!/usr/bin/env tsx
-/**
- * Real-time market check CLI (§8.4, §8.7).
- * Fetches current quotes for JP sector ETFs, applies mechanical filter,
- * and runs post-open direction checks against signal candidates.
- *
- * Usage:
- *   npx tsx src/check-market.ts [--signal-file PATH] [--output DIR] [--check-time HH:MM]
- */
+/** Real-time market check CLI (§8.4, §8.7). */
 
 import { JP_TICKERS, JP_SECTOR_NAMES } from "./config.js";
 import { fetchAllQuotes } from "./realtime.js";
 import { applyMechanicalFilter } from "./mechanical-filter.js";
 import { checkPostOpen, checkTimeWindow, formatPostOpenResults } from "./post-open-check.js";
 import { fetchMarketContext, formatMarketContextForConsole, detectOvernightMoves } from "./market-context.js";
+import { getBroker } from "./broker.js";
+import type { Level2Quote } from "./broker.js";
 import type { TradeDecision } from "./trade-decision.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
-type Args = { signalFile: string; outputDir: string; checkTime?: string };
+type Args = { signalFile: string; outputDir: string; checkTime?: string; level2: boolean };
 
 function parseArgs(): Args {
   const args = process.argv.slice(2);
   let signalFile = "output/signals.json";
   let outputDir = "output";
   let checkTime: string | undefined;
+  let level2 = false;
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--signal-file") signalFile = args[++i];
     else if (args[i] === "--output") outputDir = args[++i];
     else if (args[i] === "--check-time") checkTime = args[++i];
+    else if (args[i] === "--level2") level2 = true;
   }
-  return { signalFile, outputDir, checkTime };
+  return { signalFile, outputDir, checkTime, level2 };
 }
 
 function fmtPrice(v: number): string {
@@ -37,12 +34,11 @@ function fmtPrice(v: number): string {
 }
 
 function fmtPct(price: number, prev: number): string {
-  if (prev <= 0 || price <= 0) return "---".padStart(7);
-  return `${((price / prev - 1) * 100).toFixed(2)}%`.padStart(7);
+  return (prev <= 0 || price <= 0) ? "---".padStart(7) : `${((price / prev - 1) * 100).toFixed(2)}%`.padStart(7);
 }
 
 async function main() {
-  const { signalFile, outputDir, checkTime } = parseArgs();
+  const { signalFile, outputDir, checkTime, level2: useLevel2 } = parseArgs();
 
   console.log("=== リアルタイム市場チェック (§8.4 + §8.7) ===");
   console.log(`時刻: ${new Date().toLocaleString("ja-JP", { timeZone: "Asia/Tokyo" })} JST`);
@@ -55,14 +51,9 @@ async function main() {
   // 0. US market context (§8.1.1)
   console.log("米国主要指標取得中...");
   const usIndicators = await fetchMarketContext().catch(() => []);
-  if (usIndicators.length > 0) {
-    for (const line of formatMarketContextForConsole(usIndicators)) console.log(line);
-    const alerts = detectOvernightMoves(usIndicators);
-    if (alerts.length > 0) {
-      console.log("  ⚠ Overnight alerts:");
-      for (const a of alerts) console.log(`    ${a}`);
-    }
-  }
+  for (const line of formatMarketContextForConsole(usIndicators)) console.log(line);
+  const alerts = detectOvernightMoves(usIndicators);
+  if (alerts.length > 0) { console.log("  ⚠ Overnight alerts:"); for (const a of alerts) console.log(`    ${a}`); }
   console.log("");
 
   // 1. Fetch quotes
@@ -85,23 +76,29 @@ async function main() {
     const data = quotes.get(ticker);
     const name = (JP_SECTOR_NAMES[ticker] ?? "").padEnd(16);
     if (!data) { console.log(`${ticker.padEnd(9)} ${name}  --- 取得失敗 ---`); continue; }
-    const q = data.quote;
-    console.log(
-      `${ticker.padEnd(9)} ${name} ${fmtPrice(q.price)} ${fmtPrice(q.open)} ${fmtPrice(q.previousClose)} ${fmtPct(q.price, q.previousClose)} ${fmtPrice(q.dayHigh)} ${fmtPrice(q.dayLow)} ${String(q.volume).padStart(8)}`,
-    );
+    const { price, open, previousClose: prev, dayHigh, dayLow, volume } = data.quote;
+    console.log(`${ticker.padEnd(9)} ${name} ${fmtPrice(price)} ${fmtPrice(open)} ${fmtPrice(prev)} ${fmtPct(price, prev)} ${fmtPrice(dayHigh)} ${fmtPrice(dayLow)} ${String(volume).padStart(8)}`);
   }
   console.log("");
 
+  // 2b. Level2 板情報 from broker (optional, --level2 flag)
+  let level2Quotes: Map<string, Level2Quote> | undefined;
+  if (useLevel2) {
+    const broker = await getBroker();
+    console.log(`Level2 板情報取得中 (broker: ${broker.name})...`);
+    level2Quotes = await broker.getLevel2Quotes(JP_TICKERS);
+    console.log(`Level2 取得成功: ${level2Quotes.size} / ${JP_TICKERS.length}`);
+    console.log("");
+  }
+
   // 3. Mechanical filter (§8.4)
   console.log("--- 一次機械フィルター (§8.4) ---");
-  const filterResults = applyMechanicalFilter(JP_TICKERS, quotes);
+  const filterResults = applyMechanicalFilter(JP_TICKERS, quotes, level2Quotes);
   for (const r of filterResults) {
-    const name = (JP_SECTOR_NAMES[r.ticker] ?? r.ticker).padEnd(12);
-    const status = r.passed ? "✓ PASS" : "✗ SKIP";
+    const nm = (JP_SECTOR_NAMES[r.ticker] ?? r.ticker).padEnd(12);
+    const st = r.passed ? "✓ PASS" : "✗ SKIP";
     const src = r.spreadSource === "bid_ask" ? "実測" : r.spreadSource === "jpx_stressed" ? `JPX×${r.stressMultiplier.toFixed(1)}` : "JPX基準";
-    console.log(
-      `  ${status}  ${r.ticker} ${name} spread=${r.estimatedSpreadBps.toFixed(1)}bps [${src}] (緊急:${r.emergencyThresholdBps.toFixed(1)}bps)  ${r.reasons.join("; ")}`,
-    );
+    console.log(`  ${st}  ${r.ticker} ${nm} spread=${r.estimatedSpreadBps.toFixed(1)}bps [${src}] (緊急:${r.emergencyThresholdBps.toFixed(1)}bps)  ${r.reasons.join("; ")}`);
   }
   const passCount = filterResults.filter((r) => r.passed).length;
   console.log(`\n  通過: ${passCount} / ${filterResults.length}`);
@@ -162,16 +159,26 @@ async function main() {
     console.log(`\n※ シグナルファイル未検出: ${signalFile}`);
   }
 
-  // 5. Save results
+  // 5. Save results (includes BBO snapshot per §8.4.3)
+  const now = new Date().toISOString();
   const output = {
-    checkedAt: new Date().toISOString(),
+    checkedAt: now,
     marketState: firstQuote?.quote.marketState ?? "UNKNOWN",
+    broker: level2Quotes ? (await getBroker()).name : null,
     usIndicators,
     quotes: Object.fromEntries([...quotes.entries()].map(([k, v]) => [k, v.quote])),
     intradayBarCounts: Object.fromEntries([...quotes.entries()].map(([k, v]) => [k, v.bars.length])),
+    level2: level2Quotes ? Object.fromEntries(level2Quotes) : null,
     filterResults,
     postOpenResults,
     tradeDecision: latestDecision,
+    bboSnapshot: {
+      capturedAt: now, targetTime: "09:10",
+      spreads: filterResults.map((r) => ({
+        ticker: r.ticker, spreadBps: r.estimatedSpreadBps,
+        source: r.spreadSource, bid: r.rawBid, ask: r.rawAsk,
+      })),
+    },
     summary: { total: filterResults.length, passed: passCount },
   };
   fs.mkdirSync(outputDir, { recursive: true });

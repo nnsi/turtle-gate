@@ -17,14 +17,18 @@ import { JP_SECTOR_NAMES } from "./config.js";
 /** §8.5.5 judgment categories */
 export type LLMJudgment = "tailwind" | "neutral" | "headwind" | "invalid";
 
-/** §8.5.6 structured output */
+/** §8.5.6 structured output (§8.5.5 extended fields) */
 export type LLMResult = {
   judgment: LLMJudgment;
   summary: string;
   sectorNotes: Record<string, string>;
   confidence: number;
+  newsSummary: string;
+  riskFactors: string[];
+  eventDominance: boolean;
   provider: string;
   model: string;
+  rawPrompt?: string;
   rawResponse?: string;
 };
 
@@ -81,13 +85,17 @@ Consider:
 2. Is the sector allocation consistent with current macro themes?
 3. Any sector-specific risks (regulatory, structural) that the model might miss?
 4. Does the recent news support or contradict the signal direction?
+5. Is this an event-dominated day where sector-relative signals are unreliable? (e.g., major central bank decision, geopolitical crisis, systemic shock)
 
 ## Required Output (JSON only)
 {
   "judgment": "tailwind" | "neutral" | "headwind" | "invalid",
   "summary": "1-2 sentence assessment",
   "sectorNotes": { "ticker": "brief note for relevant sectors" },
-  "confidence": 0.0-1.0
+  "confidence": 0.0-1.0,
+  "newsSummary": "key news items affecting this signal",
+  "riskFactors": ["risk1", "risk2"],
+  "eventDominance": false
 }
 
 Rules:
@@ -95,6 +103,7 @@ Rules:
 - "neutral": no strong reason to override → trade at half size
 - "headwind": conditions work against the signal → skip trade
 - "invalid": data quality or structural issue → skip trade
+- "eventDominance": true if the entire market is driven by a single event making sector-relative signals unreliable (§11.3)
 - NEVER override a high-confidence signal (this only runs for medium band)
 
 Respond with ONLY the JSON object, no other text.`;
@@ -134,6 +143,9 @@ function createMockProvider(): LLMProvider {
         summary,
         sectorNotes,
         confidence,
+        newsSummary: "Mock: no real news data",
+        riskFactors: [],
+        eventDominance: false,
         provider: "mock",
         model: "mock-v1",
       };
@@ -149,6 +161,7 @@ function createOpenRouterProvider(): LLMProvider {
   return {
     async judge(input: LLMInput): Promise<LLMResult> {
       const prompt = buildPrompt(input);
+      const rawPrompt = prompt;
 
       const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
         method: "POST",
@@ -184,8 +197,12 @@ function createOpenRouterProvider(): LLMProvider {
           summary: "Failed to parse LLM response as JSON",
           sectorNotes: {},
           confidence: 0,
+          newsSummary: "",
+          riskFactors: [],
+          eventDominance: false,
           provider: "openrouter",
           model,
+          rawPrompt,
           rawResponse: raw,
         };
       }
@@ -196,6 +213,9 @@ function createOpenRouterProvider(): LLMProvider {
           summary?: string;
           sectorNotes?: Record<string, string>;
           confidence?: number;
+          newsSummary?: string;
+          riskFactors?: string[];
+          eventDominance?: boolean;
         };
 
         const validJudgments: LLMJudgment[] = ["tailwind", "neutral", "headwind", "invalid"];
@@ -208,8 +228,12 @@ function createOpenRouterProvider(): LLMProvider {
           summary: parsed.summary ?? "",
           sectorNotes: parsed.sectorNotes ?? {},
           confidence: typeof parsed.confidence === "number" ? parsed.confidence : 0,
+          newsSummary: parsed.newsSummary ?? "",
+          riskFactors: Array.isArray(parsed.riskFactors) ? parsed.riskFactors : [],
+          eventDominance: parsed.eventDominance === true,
           provider: "openrouter",
           model,
+          rawPrompt,
           rawResponse: raw,
         };
       } catch {
@@ -218,8 +242,12 @@ function createOpenRouterProvider(): LLMProvider {
           summary: "Failed to parse LLM JSON output",
           sectorNotes: {},
           confidence: 0,
+          newsSummary: "",
+          riskFactors: [],
+          eventDominance: false,
           provider: "openrouter",
           model,
+          rawPrompt,
           rawResponse: raw,
         };
       }

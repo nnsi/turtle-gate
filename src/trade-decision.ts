@@ -32,6 +32,7 @@ export type TradeDecision = {
   thresholdLow: number;
   llmResult?: LLMResult;
   skipReason?: string;
+  eventDominance?: boolean;
 };
 
 function sizeFromLLMJudgment(judgment: LLMResult["judgment"]): { size: TradeSize; multiplier: number } {
@@ -108,16 +109,40 @@ export async function makeTradeDecision(
     console.warn("  Context fetch failed, proceeding without:", err);
   }
 
-  const llmResult = await judgeMediumBand({
-    date: signal.date,
-    signalRange: signal.signalRange,
-    band: "medium",
-    longCandidates: signal.longCandidates,
-    shortCandidates: signal.shortCandidates,
-    signals: signal.signals,
-    newsContext,
-    marketContext,
-  });
+  // §9.5: LLM応答異常時は中確信バンド全見送り（高確信バンドは影響なし）
+  let llmResult: LLMResult;
+  try {
+    llmResult = await judgeMediumBand({
+      date: signal.date,
+      signalRange: signal.signalRange,
+      band: "medium",
+      longCandidates: signal.longCandidates,
+      shortCandidates: signal.shortCandidates,
+      signals: signal.signals,
+      newsContext,
+      marketContext,
+    });
+  } catch (err) {
+    console.warn("LLM応答異常、中確信バンド全見送り:", err);
+    return {
+      ...base,
+      size: "skip",
+      sizeMultiplier: 0.0,
+      skipReason: `LLM応答異常: ${err}`,
+    };
+  }
+
+  // §11.3: イベント支配 → 当日全停止（高確信バンド含む）
+  if (llmResult.eventDominance) {
+    return {
+      ...base,
+      size: "skip",
+      sizeMultiplier: 0.0,
+      skipReason: `Event dominance: ${llmResult.summary}`,
+      llmResult,
+      eventDominance: true,
+    };
+  }
 
   const { size, multiplier } = sizeFromLLMJudgment(llmResult.judgment);
   return {
@@ -157,9 +182,17 @@ export function formatTradeDecision(d: TradeDecision): string[] {
   lines.push(`Size: ${d.size} (×${d.sizeMultiplier})`);
   lines.push(`Thresholds: P80=${d.thresholdLow.toFixed(4)}, P90=${d.thresholdHigh.toFixed(4)}`);
 
+  if (d.eventDominance) {
+    lines.push("** EVENT DOMINANCE: all trades halted (§11.3) **");
+  }
+
   if (d.llmResult) {
     lines.push(`LLM Judgment: ${d.llmResult.judgment} (confidence: ${d.llmResult.confidence.toFixed(2)})`);
     lines.push(`LLM Summary: ${d.llmResult.summary}`);
+    if (d.llmResult.newsSummary) lines.push(`News Summary: ${d.llmResult.newsSummary}`);
+    if (d.llmResult.riskFactors.length > 0) {
+      lines.push(`Risk Factors: ${d.llmResult.riskFactors.join("; ")}`);
+    }
     lines.push(`LLM Provider: ${d.llmResult.provider}/${d.llmResult.model}`);
     if (Object.keys(d.llmResult.sectorNotes).length > 0) {
       lines.push("LLM Sector Notes:");
