@@ -30,6 +30,16 @@ def main():
     csv_path = os.path.join(out_dir, "closes.csv")
     close.to_csv(csv_path)
     print(f"Saved {len(close)} rows x {len(close.columns)} tickers to {csv_path}")
+
+    # Extract Open prices
+    open_prices = data["Open"]
+    open_prices.index = open_prices.index.strftime("%Y-%m-%d")
+    open_prices.index.name = "date"
+
+    open_csv_path = os.path.join(out_dir, "opens.csv")
+    open_prices.to_csv(open_csv_path)
+    print(f"Saved {len(open_prices)} rows x {len(open_prices.columns)} tickers to {open_csv_path}")
+
     print(f"Date range: {close.index[0]} to {close.index[-1]}")
     print(f"Tickers: {list(close.columns)}")
 

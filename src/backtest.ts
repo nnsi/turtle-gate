@@ -14,7 +14,7 @@
  *   npx tsx src/backtest.ts --csv data/closes.csv [--percentile 90]
  */
 
-import { loadClosesFromCsv, buildReturnMatrix } from "./data.js";
+import { loadClosesFromCsv, loadOpensFromCsv, buildReturnMatrix, buildOCReturnMatrix } from "./data.js";
 import {
   generateSignals,
   applyConfidenceFilter,
@@ -31,24 +31,26 @@ import * as fs from "node:fs";
 function parseArgs() {
   const args = process.argv.slice(2);
   let csv = "data/closes.csv";
+  let opensCsv = "data/opens.csv";
   let percentile = DEFAULT_PARAMS.confidencePercentile;
   let output = "output/backtest";
 
   for (let i = 0; i < args.length; i++) {
     switch (args[i]) {
       case "--csv": csv = args[++i]; break;
+      case "--opens": opensCsv = args[++i]; break;
       case "--percentile": percentile = Number(args[++i]); break;
       case "--output": output = args[++i]; break;
     }
   }
-  return { csv, percentile, output };
+  return { csv, opensCsv, percentile, output };
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Get next-day OC (open-to-close) returns for JP tickers. We approximate OC with CC (close-to-close) since we only have close data. */
+/** Get next-day CC (close-to-close) returns for tickers. */
 function getNextDayReturns(
   dates: string[],
   matrix: number[][],
@@ -62,6 +64,31 @@ function getNextDayReturns(
   const result: Record<string, number> = {};
   for (let i = 0; i < tickers.length; i++) {
     result[tickers[i]] = nextRow[i];
+  }
+  return result;
+}
+
+/** Get next-day OC (open-to-close) returns for JP tickers (paper eq. 2). */
+function getNextDayOCReturns(
+  ccDates: string[],
+  ocDates: string[],
+  ocMatrix: number[][],
+  ocTickers: string[],
+  signalDate: string,
+): Record<string, number> | null {
+  // Signal date is in CC dates. We need the next CC date's OC return.
+  const idx = ccDates.indexOf(signalDate);
+  if (idx < 0 || idx + 1 >= ccDates.length) return null;
+  const nextDate = ccDates[idx + 1];
+
+  // Find this date in OC matrix
+  const ocIdx = ocDates.indexOf(nextDate);
+  if (ocIdx < 0) return null;
+
+  const row = ocMatrix[ocIdx];
+  const result: Record<string, number> = {};
+  for (let i = 0; i < ocTickers.length; i++) {
+    result[ocTickers[i]] = row[i];
   }
   return result;
 }
@@ -133,10 +160,10 @@ function percentile(arr: number[], p: number): number {
 // Main backtest
 // ---------------------------------------------------------------------------
 async function main() {
-  const { csv, percentile: pct, output } = parseArgs();
+  const { csv, opensCsv, percentile: pct, output } = parseArgs();
 
   console.log("=== PCA_SUB Backtest ===");
-  console.log(`Data: ${csv}`);
+  console.log(`Data: ${csv}, Opens: ${opensCsv}`);
   console.log(`Params: L=${DEFAULT_PARAMS.L}, K=${DEFAULT_PARAMS.K}, λ=${DEFAULT_PARAMS.lambda}, q=${DEFAULT_PARAMS.q}`);
   console.log(`Confidence: P${pct}`);
   console.log("");
@@ -169,6 +196,25 @@ async function main() {
   const jpTickers = tickers.filter((t) => !(US_TICKERS as readonly string[]).includes(t));
   const jpIndices = jpTickers.map((t) => tickers.indexOf(t));
 
+  // Load OC return data for JP tickers (paper eq. 2: r_oc = close/open - 1)
+  let ocDates: string[] = [];
+  let ocTickers: string[] = [];
+  let ocMatrix: number[][] = [];
+  let hasOC = false;
+
+  if (fs.existsSync(opensCsv)) {
+    const openPrices = loadOpensFromCsv(opensCsv);
+    const closePrices = loadClosesFromCsv(csv);
+    const ocResult = buildOCReturnMatrix(closePrices, openPrices, jpTickers);
+    ocDates = ocResult.dates;
+    ocTickers = ocResult.tickers;
+    ocMatrix = ocResult.matrix;
+    hasOC = ocDates.length > 0;
+    console.log(`OC returns: ${ocDates.length} dates × ${ocTickers.length} JP tickers`);
+  } else {
+    console.log("WARNING: opens.csv not found, falling back to CC-only evaluation");
+  }
+
   // Estimate Cfull from long-term data (§8.2.1)
   const cfullRows = matrix.filter((_, i) => dates[i] >= CFULL_START && dates[i] <= CFULL_END);
   const cfullData = cfullRows.length >= 60 ? cfullRows : matrix;
@@ -188,7 +234,8 @@ async function main() {
     date: string;
     signal: SignalResult;
     confidence: ConfidenceResult;
-    nextDayReturn: number;        // gross L/S return (bps)
+    nextDayReturnCC: number;      // gross L/S CC return (bps)
+    nextDayReturnOC: number;      // gross L/S OC return (bps), NaN if unavailable
     turnover: number;             // 2 if trade, 0 if not
   }
 
@@ -198,17 +245,27 @@ async function main() {
     const sig = signals[i];
     const conf = confidence[i];
 
-    // Next-day returns for JP tickers
-    const nextRet = getNextDayReturns(dates, matrix, tickers, sig.date);
-    if (!nextRet) continue;
+    // Next-day CC returns
+    const nextRetCC = getNextDayReturns(dates, matrix, tickers, sig.date);
+    if (!nextRetCC) continue;
 
-    const ret = portfolioReturn(nextRet, sig.longCandidates, sig.shortCandidates);
+    const retCC = portfolioReturn(nextRetCC, sig.longCandidates, sig.shortCandidates);
+
+    // Next-day OC returns (paper eq. 2)
+    let retOC = NaN;
+    if (hasOC) {
+      const nextRetOC = getNextDayOCReturns(dates, ocDates, ocMatrix, ocTickers, sig.date);
+      if (nextRetOC) {
+        retOC = portfolioReturn(nextRetOC, sig.longCandidates, sig.shortCandidates);
+      }
+    }
 
     results.push({
       date: sig.date,
       signal: sig,
       confidence: conf,
-      nextDayReturn: ret * 10000,  // convert to bps
+      nextDayReturnCC: retCC * 10000,  // convert to bps
+      nextDayReturnOC: retOC * 10000,  // convert to bps (NaN if no open data)
       turnover: conf.isTradeDay ? 2 : 0,  // L+S = 200% when trading
     });
   }
@@ -222,18 +279,23 @@ async function main() {
   const out: string[] = [];
   const log = (s: string) => { console.log(s); out.push(s); };
 
+  // Helper: primary return (OC if available, CC fallback)
+  const ocAvailable = hasOC && results.some((r) => !isNaN(r.nextDayReturnOC));
+  const retLabel = ocAvailable ? "OC" : "CC";
+  const getRet = (r: DayResult) => ocAvailable && !isNaN(r.nextDayReturnOC) ? r.nextDayReturnOC : r.nextDayReturnCC;
+
   // --- A. Overall strategy performance ---
   log("═══════════════════════════════════════════════════════");
-  log("  A. Strategy Performance (Conv P" + pct + ")");
+  log(`  A. Strategy Performance (Conv P${pct}, ${retLabel}-based)`);
   log("═══════════════════════════════════════════════════════");
 
   const tradeDays = results.filter((r) => r.confidence.isTradeDay);
   const nonTradeDays = results.filter((r) => !r.confidence.isTradeDay);
 
   // Strategy: earn L/S return on trade days, 0 on non-trade days
-  const stratReturns = results.map((r) => r.confidence.isTradeDay ? r.nextDayReturn : 0);
-  const allDayReturns = results.map((r) => r.nextDayReturn);
-  const tradeDayReturns = tradeDays.map((r) => r.nextDayReturn);
+  const stratReturns = results.map((r) => r.confidence.isTradeDay ? getRet(r) : 0);
+  const allDayReturns = results.map((r) => getRet(r));
+  const tradeDayReturns = tradeDays.map((r) => getRet(r));
 
   const avgTO = mean(results.map((r) => r.turnover));
   const annualFactor = 250;
@@ -245,13 +307,13 @@ async function main() {
   log("");
 
   const costLevels = [0, 3, 5, 8, 10, 15]; // one-way bps
-  log("Cost (1-way bps) |  AR(%)  | Risk(%) |  R/R  | MDD(%)  | BE(bps)");
+  log(`Cost (1-way bps) |  AR(%)  | Risk(%) |  R/R  | MDD(%)  | BE(bps)   [${retLabel}]`);
   log("-----------------|---------|---------|-------|---------|--------");
 
   for (const cost of costLevels) {
     // Net return = gross - turnover * cost
     const netReturns = results.map((r) =>
-      r.confidence.isTradeDay ? r.nextDayReturn - r.turnover * cost : 0
+      r.confidence.isTradeDay ? getRet(r) - r.turnover * cost : 0
     );
     const dailyMean = mean(netReturns);
     const dailyStd = std(netReturns);
@@ -274,6 +336,25 @@ async function main() {
     }
   }
 
+  // CC reference (if OC is primary)
+  if (ocAvailable) {
+    log("");
+    log("  [CC reference]");
+    const ccStratReturns = results.map((r) => r.confidence.isTradeDay ? r.nextDayReturnCC : 0);
+    const ccMean = mean(ccStratReturns);
+    const ccStd = std(ccStratReturns);
+    const ccAR = ccMean * annualFactor / 10000 * 100;
+    const ccRisk = ccStd * Math.sqrt(annualFactor) / 10000 * 100;
+    const ccRR = ccRisk > 0 ? ccAR / ccRisk : 0;
+    let ccCum = 0;
+    const ccCumArr = ccStratReturns.map((r) => { ccCum += r / 10000; return ccCum; });
+    const ccMDD = maxDrawdown(ccCumArr) * 100;
+    log(`  CC Gross:  AR=${ccAR.toFixed(1)}%  Risk=${ccRisk.toFixed(1)}%  R/R=${ccRR.toFixed(2)}  MDD=${ccMDD.toFixed(1)}%`);
+    const ocMean = mean(stratReturns);
+    const ratio = ccMean !== 0 ? ocMean / ccMean : 0;
+    log(`  OC/CC ratio: ${ratio.toFixed(3)}`);
+  }
+
   // --- B. All-day strategy (no filter, daily rebalance) ---
   log("");
   log("═══════════════════════════════════════════════════════");
@@ -291,7 +372,7 @@ async function main() {
   const allCumArr = allDayReturns.map((r) => { allCum += r / 10000; return allCum; });
   const allMDD = maxDrawdown(allCumArr) * 100;
 
-  log(`  AR: ${allAR.toFixed(1)}%  Risk: ${allRisk.toFixed(1)}%  R/R: ${allRR.toFixed(2)}  MDD: ${allMDD.toFixed(1)}%  BE: ${allBE.toFixed(1)} bps`);
+  log(`  [${retLabel}] AR: ${allAR.toFixed(1)}%  Risk: ${allRisk.toFixed(1)}%  R/R: ${allRR.toFixed(2)}  MDD: ${allMDD.toFixed(1)}%  BE: ${allBE.toFixed(1)} bps`);
   log(`  Avg daily α: ${allDailyMean.toFixed(1)} bps  t-stat: ${tStat(allDayReturns).toFixed(2)}`);
 
   // --- C. Trade day vs Non-trade day ---
@@ -301,7 +382,8 @@ async function main() {
   log("═══════════════════════════════════════════════════════");
   log("");
 
-  const nonTradeReturns = nonTradeDays.map((r) => r.nextDayReturn);
+  const nonTradeReturns = nonTradeDays.map((r) => getRet(r));
+  log(`  [${retLabel}]`);
   log(`  Trade days:     N=${tradeDayReturns.length}  avg=${mean(tradeDayReturns).toFixed(1)} bps  t=${tStat(tradeDayReturns).toFixed(2)}`);
   log(`  Non-trade days: N=${nonTradeReturns.length}  avg=${mean(nonTradeReturns).toFixed(1)} bps  t=${tStat(nonTradeReturns).toFixed(2)}`);
   log(`  Difference:     ${(mean(tradeDayReturns) - mean(nonTradeReturns)).toFixed(1)} bps`);
@@ -323,7 +405,7 @@ async function main() {
     const start = q * qSize;
     const end = q === 4 ? sortedByRange.length : (q + 1) * qSize;
     const slice = sortedByRange.slice(start, end);
-    const rets = slice.map((r) => r.nextDayReturn);
+    const rets = slice.map((r) => getRet(r));
     const ranges = slice.map((r) => r.signal.signalRange);
     log(`  Q${q + 1}     | ${String(slice.length).padStart(3)} | ${mean(rets).toFixed(1).padStart(10)} | ${tStat(rets).toFixed(2).padStart(6)} | ${mean(ranges).toFixed(4)}`);
   }
@@ -355,7 +437,7 @@ async function main() {
       const start = q * qs;
       const end = q === 4 ? sorted.length : (q + 1) * qs;
       const slice = sorted.slice(start, end);
-      const rets = slice.map((r) => r.nextDayReturn);
+      const rets = slice.map((r) => getRet(r));
       log(`    Q${q + 1}     | ${String(slice.length).padStart(3)} | ${mean(rets).toFixed(1).padStart(10)} | ${tStat(rets).toFixed(2).padStart(6)}`);
     }
 
@@ -364,7 +446,7 @@ async function main() {
     for (let q = 0; q < 5; q++) {
       const start = q * qs;
       const end = q === 4 ? sorted.length : (q + 1) * qs;
-      qMeans.push(mean(sorted.slice(start, end).map((r) => r.nextDayReturn)));
+      qMeans.push(mean(sorted.slice(start, end).map((r) => getRet(r))));
     }
     const isMonotonic = qMeans[4] > qMeans[3] && qMeans[3] > qMeans[1] && qMeans[4] > qMeans[0];
     log(`  Monotonic (Q5 > Q1): ${qMeans[4].toFixed(1)} vs ${qMeans[0].toFixed(1)} → ${isMonotonic ? "YES" : "NO"}`);
@@ -396,7 +478,7 @@ async function main() {
   // --- G. Annual breakdown ---
   log("");
   log("═══════════════════════════════════════════════════════");
-  log("  G. Annual Performance (Conv P" + pct + ", Gross)");
+  log(`  G. Annual Performance (Conv P${pct}, Gross, ${retLabel})`);
   log("═══════════════════════════════════════════════════════");
   log("");
   log("Year | Trade Days | Avg α(bps) |  AR(%)  | Win Rate");
@@ -406,8 +488,8 @@ async function main() {
   for (const year of years) {
     const yearResults = results.filter((r) => r.date.startsWith(year));
     const yearTrades = yearResults.filter((r) => r.confidence.isTradeDay);
-    const yearTradeRets = yearTrades.map((r) => r.nextDayReturn);
-    const yearStratRets = yearResults.map((r) => r.confidence.isTradeDay ? r.nextDayReturn : 0);
+    const yearTradeRets = yearTrades.map((r) => getRet(r));
+    const yearStratRets = yearResults.map((r) => r.confidence.isTradeDay ? getRet(r) : 0);
 
     const yearAR = mean(yearStratRets) * annualFactor / 10000 * 100;
     const winRate = yearTradeRets.length > 0
@@ -433,9 +515,9 @@ async function main() {
 
   // Apply IS threshold to OOS
   const oosTrades = oosResults.filter((r) => r.signal.signalRange >= isThreshold);
-  const oosTradeRets = oosTrades.map((r) => r.nextDayReturn);
-  const oosAllRets = oosResults.map((r) => r.nextDayReturn);
-  const oosStratRets = oosResults.map((r) => r.signal.signalRange >= isThreshold ? r.nextDayReturn : 0);
+  const oosTradeRets = oosTrades.map((r) => getRet(r));
+  const oosAllRets = oosResults.map((r) => getRet(r));
+  const oosStratRets = oosResults.map((r) => r.signal.signalRange >= isThreshold ? getRet(r) : 0);
 
   const oosAvgTO = oosTrades.length * 2 / oosResults.length;
   const oosStratAR = mean(oosStratRets) * annualFactor / 10000 * 100;
@@ -461,7 +543,8 @@ async function main() {
     signalRange: r.signal.signalRange,
     isTradeDay: r.confidence.isTradeDay,
     threshold: r.confidence.threshold,
-    grossReturnBps: r.nextDayReturn,
+    grossReturnOCBps: getRet(r),
+    grossReturnCCBps: r.nextDayReturnCC,
     longCandidates: r.signal.longCandidates,
     shortCandidates: r.signal.shortCandidates,
   }));
