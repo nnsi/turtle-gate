@@ -21,7 +21,8 @@ import {
   type SignalResult,
   type ConfidenceResult,
 } from "./signal.js";
-import { DEFAULT_PARAMS, JP_SECTOR_NAMES, US_TICKERS, JP_TICKERS } from "./config.js";
+import { correlationMatrix } from "./linalg.js";
+import { DEFAULT_PARAMS, JP_SECTOR_NAMES, US_TICKERS, JP_TICKERS, CFULL_START, CFULL_END } from "./config.js";
 import * as fs from "node:fs";
 
 // ---------------------------------------------------------------------------
@@ -32,15 +33,19 @@ function parseArgs() {
   let csv = "data/closes.csv";
   let percentile = DEFAULT_PARAMS.confidencePercentile;
   let output = "output/backtest";
+  let start = "";
+  const exclude: string[] = [];
 
   for (let i = 0; i < args.length; i++) {
     switch (args[i]) {
       case "--csv": csv = args[++i]; break;
       case "--percentile": percentile = Number(args[++i]); break;
       case "--output": output = args[++i]; break;
+      case "--start": start = args[++i]; break;
+      case "--exclude": exclude.push(...args[++i].split(",")); break;
     }
   }
-  return { csv, percentile, output };
+  return { csv, percentile, output, start, exclude };
 }
 
 // ---------------------------------------------------------------------------
@@ -132,18 +137,25 @@ function percentile(arr: number[], p: number): number {
 // Main backtest
 // ---------------------------------------------------------------------------
 async function main() {
-  const { csv, percentile: pct, output } = parseArgs();
+  const { csv, percentile: pct, output, start, exclude } = parseArgs();
 
   console.log("=== PCA_SUB Backtest ===");
   console.log(`Data: ${csv}`);
+  if (start) console.log(`Start filter: ${start}`);
+  if (exclude.length) console.log(`Excluded tickers: ${exclude.join(", ")}`);
   console.log(`Params: L=${DEFAULT_PARAMS.L}, K=${DEFAULT_PARAMS.K}, λ=${DEFAULT_PARAMS.lambda}, q=${DEFAULT_PARAMS.q}`);
   console.log(`Confidence: P${pct}`);
   console.log("");
 
   // 1. Load data
-  const prices = loadClosesFromCsv(csv);
+  let prices = loadClosesFromCsv(csv);
+  if (start) {
+    prices = prices.filter((p) => p.date >= start);
+  }
   const allTickers = [...US_TICKERS, ...JP_TICKERS] as unknown as string[];
-  const activeTickers = allTickers.filter((t) => prices.some((p) => p.ticker === t));
+  const activeTickers = allTickers.filter((t) =>
+    !exclude.includes(t) && prices.some((p) => p.ticker === t),
+  );
 
   // Compute returns manually
   const byTicker = new Map<string, { date: string; close: number }[]>();
@@ -168,9 +180,15 @@ async function main() {
   const jpTickers = tickers.filter((t) => !(US_TICKERS as readonly string[]).includes(t));
   const jpIndices = jpTickers.map((t) => tickers.indexOf(t));
 
+  // Estimate Cfull from long-term data (§8.2.1)
+  const cfullRows = matrix.filter((_, i) => dates[i] >= CFULL_START && dates[i] <= CFULL_END);
+  const cfullData = cfullRows.length >= 60 ? cfullRows : matrix;
+  const Cfull = correlationMatrix(cfullData);
+  console.log(`Cfull estimated from ${cfullData.length} rows`);
+
   // 2. Generate signals
   console.log("Generating signals...");
-  const signals = generateSignals(dates, matrix, tickers, DEFAULT_PARAMS);
+  const signals = generateSignals(dates, matrix, tickers, DEFAULT_PARAMS, Cfull);
   console.log(`Signal dates: ${signals.length}`);
 
   // 3. Confidence filter
@@ -328,6 +346,8 @@ async function main() {
   log("═══════════════════════════════════════════════════════");
 
   const subPeriods = [
+    { name: "2010-2012", start: "2010-01-01", end: "2012-12-31" },
+    { name: "2013-2014", start: "2013-01-01", end: "2014-12-31" },
     { name: "2015-2017", start: "2015-01-01", end: "2017-12-31" },
     { name: "2018-2020", start: "2018-01-01", end: "2020-12-31" },
     { name: "2021-2023", start: "2021-01-01", end: "2023-12-31" },
