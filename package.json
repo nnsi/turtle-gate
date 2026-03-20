@@ -1,0 +1,19 @@
+{
+  "name": "turtle-gate",
+  "version": "0.1.0",
+  "description": "US-Japan sector lead-lag signal generation system",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "signal": "tsx src/generate-signal.ts"
+  },
+  "dependencies": {
+    "mathjs": "^13.2.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0",
+    "@types/node": "^22.0.0"
+  }
+}
