@@ -9,12 +9,19 @@ export interface PriceRow {
   date: string;       // YYYY-MM-DD
   ticker: string;
   close: number;
+  open?: number;
 }
 
 export interface ReturnRow {
   date: string;
   ticker: string;
   ret: number;        // close-to-close log return
+}
+
+export interface OCReturnRow {
+  date: string;
+  ticker: string;
+  ret: number;        // open-to-close simple return: close/open - 1
 }
 
 /**
@@ -40,6 +47,80 @@ export function loadClosesFromCsv(csvPath: string): PriceRow[] {
   }
 
   return rows;
+}
+
+/**
+ * Load open prices from a CSV file (output of scripts/fetch-data.py).
+ * CSV format: date,TICKER1,TICKER2,...
+ */
+export function loadOpensFromCsv(csvPath: string): PriceRow[] {
+  const content = fs.readFileSync(csvPath, "utf-8");
+  const lines = content.trim().split("\n");
+  const header = lines[0].split(",");
+  const tickers = header.slice(1);
+
+  const rows: PriceRow[] = [];
+  for (let i = 1; i < lines.length; i++) {
+    const cols = lines[i].split(",");
+    const date = cols[0];
+    for (let j = 1; j < cols.length; j++) {
+      const val = parseFloat(cols[j]);
+      if (!isNaN(val)) {
+        rows.push({ date, ticker: tickers[j - 1], open: val, close: 0 });
+      }
+    }
+  }
+
+  return rows;
+}
+
+/**
+ * Build OC (open-to-close) return matrix for JP tickers.
+ * OC return = close[t] / open[t] - 1 (simple return, per paper eq. 2).
+ * Returns only rows where ALL given tickers have both open and close data.
+ */
+export function buildOCReturnMatrix(
+  closes: PriceRow[],
+  opens: PriceRow[],
+  tickers: string[],
+): { dates: string[]; tickers: string[]; matrix: number[][] } {
+  // Index open prices by date+ticker
+  const openMap = new Map<string, number>();
+  for (const o of opens) {
+    openMap.set(`${o.date}|${o.ticker}`, o.open!);
+  }
+
+  // Index close prices by date+ticker
+  const closeMap = new Map<string, number>();
+  for (const c of closes) {
+    closeMap.set(`${c.date}|${c.ticker}`, c.close);
+  }
+
+  // Collect all dates from closes
+  const allDates = [...new Set(closes.map((c) => c.date))].sort();
+
+  const validDates: string[] = [];
+  const matrix: number[][] = [];
+
+  for (const d of allDates) {
+    const row: number[] = [];
+    let valid = true;
+    for (const t of tickers) {
+      const openVal = openMap.get(`${d}|${t}`);
+      const closeVal = closeMap.get(`${d}|${t}`);
+      if (openVal == null || closeVal == null || openVal === 0) {
+        valid = false;
+        break;
+      }
+      row.push(closeVal / openVal - 1); // simple OC return
+    }
+    if (valid) {
+      validDates.push(d);
+      matrix.push(row);
+    }
+  }
+
+  return { dates: validDates, tickers, matrix };
 }
 
 /**
