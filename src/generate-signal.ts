@@ -15,12 +15,13 @@ import { DEFAULT_PARAMS, JP_SECTOR_NAMES } from "./config.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
-function parseArgs(): { start: string; end: string; percentile: number; outputDir: string } {
+function parseArgs(): { start: string; end: string; percentile: number; outputDir: string; csv?: string } {
   const args = process.argv.slice(2);
   let start = "";
   let end = "";
   let percentile = DEFAULT_PARAMS.confidencePercentile;
   let outputDir = "output";
+  let csv: string | undefined;
 
   for (let i = 0; i < args.length; i++) {
     switch (args[i]) {
@@ -36,6 +37,9 @@ function parseArgs(): { start: string; end: string; percentile: number; outputDi
       case "--output":
         outputDir = args[++i];
         break;
+      case "--csv":
+        csv = args[++i];
+        break;
     }
   }
 
@@ -49,7 +53,7 @@ function parseArgs(): { start: string; end: string; percentile: number; outputDi
     start = d.toISOString().slice(0, 10);
   }
 
-  return { start, end, percentile, outputDir };
+  return { start, end, percentile, outputDir, csv };
 }
 
 function formatSignalReport(
@@ -97,7 +101,7 @@ function formatSignalReport(
 }
 
 async function main() {
-  const { start, end, percentile, outputDir } = parseArgs();
+  const { start, end, percentile, outputDir, csv } = parseArgs();
 
   console.log(`Signal Generation (PCA_SUB)`);
   console.log(`  Period: ${start} to ${end}`);
@@ -106,7 +110,7 @@ async function main() {
   console.log("");
 
   // 1. Fetch data
-  const { dates, tickers, matrix } = await fetchAllData(start, end);
+  const { dates, tickers, matrix } = await fetchAllData(start, end, csv);
   console.log(`Aligned data: ${dates.length} dates × ${tickers.length} tickers`);
   console.log("");
 

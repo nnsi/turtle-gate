@@ -1,6 +1,8 @@
 /**
- * Market data fetching via Yahoo Finance API (direct HTTP).
+ * Market data loading from CSV (fetched via scripts/fetch-data.py)
+ * and Yahoo Finance API fallback.
  */
+import * as fs from "node:fs";
 import { US_TICKERS, JP_TICKERS } from "./config.js";
 
 export interface PriceRow {
@@ -13,6 +15,31 @@ export interface ReturnRow {
   date: string;
   ticker: string;
   ret: number;        // close-to-close log return
+}
+
+/**
+ * Load close prices from a CSV file (output of scripts/fetch-data.py).
+ * CSV format: date,TICKER1,TICKER2,...
+ */
+export function loadClosesFromCsv(csvPath: string): PriceRow[] {
+  const content = fs.readFileSync(csvPath, "utf-8");
+  const lines = content.trim().split("\n");
+  const header = lines[0].split(",");
+  const tickers = header.slice(1); // first column is date
+
+  const rows: PriceRow[] = [];
+  for (let i = 1; i < lines.length; i++) {
+    const cols = lines[i].split(",");
+    const date = cols[0];
+    for (let j = 1; j < cols.length; j++) {
+      const val = parseFloat(cols[j]);
+      if (!isNaN(val)) {
+        rows.push({ date, ticker: tickers[j - 1], close: val });
+      }
+    }
+  }
+
+  return rows;
 }
 
 /**
@@ -63,25 +90,6 @@ async function fetchTickerPrices(
     }
   }
   throw new Error(`Failed to fetch ${ticker} after 3 attempts: ${lastErr}`);
-}
-
-/**
- * Fetch daily close prices for multiple tickers.
- */
-async function fetchPrices(
-  tickers: readonly string[],
-  startDate: string,
-  endDate: string,
-): Promise<PriceRow[]> {
-  const allRows: PriceRow[] = [];
-  // Fetch sequentially to avoid rate limits
-  for (const ticker of tickers) {
-    const rows = await fetchTickerPrices(ticker, startDate, endDate);
-    allRows.push(...rows);
-    // Brief pause between requests
-    await new Promise((r) => setTimeout(r, 300));
-  }
-  return allRows;
 }
 
 /**
@@ -145,24 +153,42 @@ export function buildReturnMatrix(
 }
 
 /**
- * Fetch all US + JP data and return aligned return matrix.
+ * Load data from CSV file or fetch via API, and return aligned return matrix.
  */
 export async function fetchAllData(
   startDate: string,
   endDate: string,
+  csvPath?: string,
 ): Promise<{ dates: string[]; tickers: string[]; matrix: number[][] }> {
-  console.log("Fetching US sector ETF prices...");
-  const usPrices = await fetchPrices(US_TICKERS, startDate, endDate);
-  console.log(`  Got ${usPrices.length} US price rows`);
+  let allPrices: PriceRow[];
 
-  console.log("Fetching JP sector ETF prices...");
-  const jpPrices = await fetchPrices(JP_TICKERS, startDate, endDate);
-  console.log(`  Got ${jpPrices.length} JP price rows`);
+  if (csvPath && fs.existsSync(csvPath)) {
+    console.log(`Loading data from CSV: ${csvPath}`);
+    allPrices = loadClosesFromCsv(csvPath);
+    console.log(`  Loaded ${allPrices.length} price rows`);
+  } else {
+    console.log("Fetching US sector ETF prices...");
+    const usPrices: PriceRow[] = [];
+    for (const ticker of US_TICKERS) {
+      const rows = await fetchTickerPrices(ticker, startDate, endDate);
+      usPrices.push(...rows);
+      await new Promise((r) => setTimeout(r, 300));
+    }
+    console.log(`  Got ${usPrices.length} US price rows`);
 
-  const allReturns = [
-    ...computeReturns(usPrices),
-    ...computeReturns(jpPrices),
-  ];
+    console.log("Fetching JP sector ETF prices...");
+    const jpPrices: PriceRow[] = [];
+    for (const ticker of JP_TICKERS) {
+      const rows = await fetchTickerPrices(ticker, startDate, endDate);
+      jpPrices.push(...rows);
+      await new Promise((r) => setTimeout(r, 300));
+    }
+    console.log(`  Got ${jpPrices.length} JP price rows`);
+
+    allPrices = [...usPrices, ...jpPrices];
+  }
+
+  const allReturns = computeReturns(allPrices);
 
   // Dynamic universe: exclude tickers with insufficient data
   const allTickers = [...US_TICKERS, ...JP_TICKERS] as unknown as string[];
