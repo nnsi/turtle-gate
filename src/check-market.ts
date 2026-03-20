@@ -12,6 +12,8 @@ import { JP_TICKERS, JP_SECTOR_NAMES } from "./config.js";
 import { fetchAllQuotes } from "./realtime.js";
 import { applyMechanicalFilter } from "./mechanical-filter.js";
 import { checkPostOpen, checkTimeWindow, formatPostOpenResults } from "./post-open-check.js";
+import { fetchMarketContext, formatMarketContextForConsole, detectOvernightMoves } from "./market-context.js";
+import type { TradeDecision } from "./trade-decision.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
@@ -48,6 +50,19 @@ async function main() {
   // Time window warning (§8.7.1)
   const timeWarn = checkTimeWindow(checkTime);
   if (timeWarn) console.log(`⚠ ${timeWarn}`);
+  console.log("");
+
+  // 0. US market context (§8.1.1)
+  console.log("米国主要指標取得中...");
+  const usIndicators = await fetchMarketContext().catch(() => []);
+  if (usIndicators.length > 0) {
+    for (const line of formatMarketContextForConsole(usIndicators)) console.log(line);
+    const alerts = detectOvernightMoves(usIndicators);
+    if (alerts.length > 0) {
+      console.log("  ⚠ Overnight alerts:");
+      for (const a of alerts) console.log(`    ${a}`);
+    }
+  }
   console.log("");
 
   // 1. Fetch quotes
@@ -93,12 +108,28 @@ async function main() {
 
   // 4. Post-open check with signal integration (§8.7)
   let postOpenResults: ReturnType<typeof checkPostOpen> = [];
+  let latestDecision: TradeDecision | null = null;
   if (fs.existsSync(signalFile)) {
     const signalData = JSON.parse(fs.readFileSync(signalFile, "utf-8"));
     const latest = signalData.results?.[signalData.results.length - 1];
+    latestDecision = signalData.latestDecision ?? null;
+
+    // Show trade decision info (§8.6)
+    if (latestDecision) {
+      const bandLabel = latestDecision.band === "high" ? "HIGH (auto-pass)"
+        : latestDecision.band === "medium" ? `MEDIUM (LLM: ${latestDecision.llmResult?.judgment ?? "N/A"})`
+        : "LOW (skip)";
+      console.log(`\n--- 売買判定 (§8.6) ---`);
+      console.log(`  Band: ${bandLabel}`);
+      console.log(`  Size: ${latestDecision.size} (×${latestDecision.sizeMultiplier})`);
+      if (latestDecision.skipReason) console.log(`  Skip: ${latestDecision.skipReason}`);
+    }
+
     if (latest?.confidence?.isTradeDay) {
       console.log(`\n--- 寄り後価格確認 (§8.7) シグナル: ${latest.date} ---`);
       console.log(`Signal Range: ${latest.signalRange?.toFixed(4) ?? "N/A"}`);
+      const band = latest.confidence?.band ?? "?";
+      console.log(`Confidence Band: ${band.toUpperCase()}`);
 
       const longs: string[] = latest.longCandidates ?? [];
       const shorts: string[] = latest.shortCandidates ?? [];
@@ -109,16 +140,23 @@ async function main() {
       const dirOk = postOpenResults.filter((r) => r.passed).length;
       console.log(`\n  方向維持: ${dirOk} / ${postOpenResults.length}`);
 
-      // Combined: mechanical filter + direction check
-      console.log("\n--- 最終候補 (§8.4 + §8.7 通過) ---");
-      for (const poc of postOpenResults) {
-        const mf = filterResults.find((r) => r.ticker === poc.ticker);
-        const both = (mf?.passed ?? false) && poc.passed;
-        const dir = poc.signalDirection === "long" ? "LONG" : "SHORT";
-        console.log(`  ${both ? "✓" : "✗"} ${poc.ticker} (${JP_SECTOR_NAMES[poc.ticker] ?? poc.ticker}) [${dir}]  filter:${mf?.passed ? "OK" : "NG"} dir:${poc.passed ? "OK" : "NG"}`);
+      // Combined: trade decision + mechanical filter + direction check (§8.6.1)
+      const shouldTrade = !latestDecision || latestDecision.size !== "skip";
+      console.log("\n--- 最終候補 (§8.6 + §8.4 + §8.7 通過) ---");
+      if (!shouldTrade) {
+        console.log("  ※ 売買判定により全銘柄見送り");
+      } else {
+        const sizeLabel = latestDecision?.size === "half" ? " [HALF]" : "";
+        for (const poc of postOpenResults) {
+          const mf = filterResults.find((r) => r.ticker === poc.ticker);
+          const all = shouldTrade && (mf?.passed ?? false) && poc.passed;
+          const dir = poc.signalDirection === "long" ? "LONG" : "SHORT";
+          console.log(`  ${all ? "✓" : "✗"} ${poc.ticker} (${JP_SECTOR_NAMES[poc.ticker] ?? poc.ticker}) [${dir}]${all ? sizeLabel : ""}  filter:${mf?.passed ? "OK" : "NG"} dir:${poc.passed ? "OK" : "NG"}`);
+        }
       }
     } else if (latest) {
-      console.log(`\n--- シグナル (${latest.date}): 低確信 → 当日見送り ---`);
+      const band = latest.confidence?.band ?? "low";
+      console.log(`\n--- シグナル (${latest.date}): ${band === "low" ? "低確信" : band} → 当日見送り ---`);
     }
   } else {
     console.log(`\n※ シグナルファイル未検出: ${signalFile}`);
@@ -128,10 +166,12 @@ async function main() {
   const output = {
     checkedAt: new Date().toISOString(),
     marketState: firstQuote?.quote.marketState ?? "UNKNOWN",
+    usIndicators,
     quotes: Object.fromEntries([...quotes.entries()].map(([k, v]) => [k, v.quote])),
     intradayBarCounts: Object.fromEntries([...quotes.entries()].map(([k, v]) => [k, v.bars.length])),
     filterResults,
     postOpenResults,
+    tradeDecision: latestDecision,
     summary: { total: filterResults.length, passed: passCount },
   };
   fs.mkdirSync(outputDir, { recursive: true });

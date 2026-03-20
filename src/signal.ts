@@ -37,12 +37,18 @@ export interface SignalResult {
   factorScores: number[];
 }
 
+export type ConfidenceBand = "high" | "medium" | "low";
+
 export interface ConfidenceResult {
   date: string;
   signalRange: number;
   threshold: number;
   isTradeDay: boolean;
   reason?: string;
+  /** Dual-band fields (set by applyDualBandFilter) */
+  band?: ConfidenceBand;
+  thresholdHigh?: number;
+  thresholdLow?: number;
 }
 
 /**
@@ -253,8 +259,9 @@ export function generateSignals(
 }
 
 /**
- * Apply confidence filter (section 8.3).
+ * Apply confidence filter (section 8.3) — single threshold version.
  * Expanding window: at each date, use all past signal ranges to compute percentile threshold.
+ * Kept for backward compatibility with backtest.
  */
 export function applyConfidenceFilter(
   signalResults: SignalResult[],
@@ -294,6 +301,76 @@ export function applyConfidenceFilter(
     });
 
     // Push today's range AFTER threshold computation
+    pastRanges.push(sr.signalRange);
+  }
+
+  return results;
+}
+
+/**
+ * Apply dual-band confidence filter (section 8.3.3).
+ * - P90+ → high confidence (auto-pass)
+ * - P80–P89 → medium confidence (LLM review required)
+ * - <P80 → low confidence (auto-skip)
+ */
+export function applyDualBandFilter(
+  signalResults: SignalResult[],
+  percentileHigh: number = DEFAULT_PARAMS.confidencePercentile,
+  percentileLow: number = DEFAULT_PARAMS.confidencePercentileLow,
+): ConfidenceResult[] {
+  const results: ConfidenceResult[] = [];
+  const pastRanges: number[] = [];
+
+  for (const sr of signalResults) {
+    if (pastRanges.length < 20) {
+      results.push({
+        date: sr.date,
+        signalRange: sr.signalRange,
+        threshold: Infinity,
+        thresholdHigh: Infinity,
+        thresholdLow: Infinity,
+        isTradeDay: false,
+        band: "low",
+        reason: "Insufficient history for confidence filter",
+      });
+      pastRanges.push(sr.signalRange);
+      continue;
+    }
+
+    const sorted = [...pastRanges].sort((a, b) => a - b);
+    const idxHigh = Math.floor((percentileHigh / 100) * (sorted.length - 1));
+    const idxLow = Math.floor((percentileLow / 100) * (sorted.length - 1));
+    const thresholdHigh = sorted[idxHigh];
+    const thresholdLow = sorted[idxLow];
+
+    let band: ConfidenceBand;
+    let reason: string | undefined;
+
+    if (sr.signalRange >= thresholdHigh) {
+      band = "high";
+      reason = undefined;
+    } else if (sr.signalRange >= thresholdLow) {
+      band = "medium";
+      reason = `Medium band: ${sr.signalRange.toFixed(4)} ∈ [P${percentileLow}=${thresholdLow.toFixed(4)}, P${percentileHigh}=${thresholdHigh.toFixed(4)})`;
+    } else {
+      band = "low";
+      reason = `Signal range ${sr.signalRange.toFixed(4)} < P${percentileLow} threshold ${thresholdLow.toFixed(4)}`;
+    }
+
+    // isTradeDay = high or medium (medium still needs LLM approval)
+    const isTradeDay = band !== "low";
+
+    results.push({
+      date: sr.date,
+      signalRange: sr.signalRange,
+      threshold: thresholdHigh,
+      thresholdHigh,
+      thresholdLow,
+      isTradeDay,
+      band,
+      reason,
+    });
+
     pastRanges.push(sr.signalRange);
   }
 

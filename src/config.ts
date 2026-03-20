@@ -52,8 +52,10 @@ export interface SignalParams {
   lambda: number;
   /** Quantile for long/short selection (top/bottom q) */
   q: number;
-  /** Confidence filter percentile (0-100) */
+  /** Confidence filter percentile — high confidence band (0-100) */
   confidencePercentile: number;
+  /** Confidence filter percentile — medium confidence lower bound (0-100) */
+  confidencePercentileLow: number;
 }
 
 export const DEFAULT_PARAMS: SignalParams = {
@@ -62,6 +64,7 @@ export const DEFAULT_PARAMS: SignalParams = {
   lambda: 0.9,
   q: 0.3,
   confidencePercentile: 90,
+  confidencePercentileLow: 80,
 };
 
 /** Cfull estimation period (§8.2.1): 2010-01 to 2014-12 */

@@ -14,8 +14,8 @@
 |------|------|---------|------|
 | 8.1.1 米国セクターETF 11銘柄取得 | ◯ | `src/config.ts:7-9` US_TICKERS | XLB～XLY |
 | 8.1.1 日本TOPIX-17 ETF取得 | ◯ | `src/config.ts:12-16` JP_TICKERS | 1617.T～1633.T |
-| 8.1.1 米国主要指数・金利・為替等 | ✕ | — | 一次機械フィルター/LLMフィルター用。シグナル生成には不要 |
-| 8.1.1 ニュース・経済情報（LLM入力用） | ✕ | — | 外部API連携が必要 |
+| 8.1.1 米国主要指数・金利・為替等 | ◯ | `src/market-context.ts` | SPY, VIX, US10Y, USDJPY, DXY。check-marketで表示、LLMプロンプトに注入 |
+| 8.1.1 ニュース・経済情報（LLM入力用） | ◯ | `src/news.ts` fetchMarketNews | Finnhub(EN)+Google News RSS(JP)。LLMプロンプトに注入 |
 | 8.1.2 取得失敗時リトライ | ◯ | `src/data.ts:130` fetchTickerPrices | 最大3回リトライ |
 | 8.1.2 データ欠損検知・当日見送り | ◯ | `src/data.ts:207` buildReturnMatrix | 全銘柄揃う日のみ採用 |
 | 8.1.2 過去60営業日ローリングウィンドウ保持 | ◯ | `src/signal.ts:216` generateSignals | L=60のウィンドウでスライス |
@@ -43,7 +43,7 @@
 | 8.2.2 17業種シグナル出力 | ◯ | `src/signal.ts:118` | Record<ticker, signal> |
 | 8.2.2 ロング/ショート候補リスト | ◯ | `src/signal.ts:181` selectCandidates | |
 | 8.2.2 シグナルレンジ出力 | ◯ | `src/signal.ts:199` computeSignalRange | Long平均 − Short平均 |
-| Cfull更新ポリシー | ✕ | — | 初期方針では固定。モニタリング機能は未実装 |
+| Cfull更新ポリシー | ◯ | `src/cfull-monitor.ts` | Frobenius距離・固有値シフト・部分空間角度の3指標で監視。stable/monitor/recalibrate判定 |
 | 8.2.3 パラメータ外部設定 (L,K,λ,q) | ◯ | `src/config.ts:46,59` SignalParams / DEFAULT_PARAMS | CLI引数でも一部変更可能 |
 | 8.2.3 同一入力→同一出力の再現性 | ◯ | — | 乱数不使用。決定的計算 |
 
@@ -55,10 +55,10 @@
 |------|------|---------|------|
 | 8.3.3 シグナルレンジ計算 | ◯ | `src/signal.ts:199` computeSignalRange | |
 | 8.3.3 拡張ウィンドウ方式パーセンタイル閾値 | ◯ | `src/signal.ts:259` applyConfidenceFilter | 各日時点で過去データのみ使用 |
-| 8.3.3 P90閾値による高確信バンド判定 | △ | `src/signal.ts:259` | 現状は単一閾値判定。P80/P90のデュアルバンド分岐は未実装 |
-| 8.3.3 P80閾値による中確信バンド判定 | ✕ | — | デュアルバンド対応が必要 |
-| 8.3.3 低確信（P80未満）自動見送り | △ | `src/signal.ts:259` | 現状は単一閾値の見送り判定として機能 |
-| 8.3.4 閾値設定可能（P80/P90の組合せ変更） | △ | `src/generate-signal.ts:35` | --percentile CLI引数で単一閾値は変更可。デュアル閾値は未対応 |
+| 8.3.3 P90閾値による高確信バンド判定 | ◯ | `src/signal.ts` applyDualBandFilter | P90以上→high band |
+| 8.3.3 P80閾値による中確信バンド判定 | ◯ | `src/signal.ts` applyDualBandFilter | P80-P89→medium band |
+| 8.3.3 低確信（P80未満）自動見送り | ◯ | `src/signal.ts` applyDualBandFilter | P80未満→low band→自動見送り |
+| 8.3.4 閾値設定可能（P80/P90の組合せ変更） | ◯ | `src/generate-signal.ts` | --percentile, --percentile-low CLI引数で両方変更可 |
 | 8.3.4 バンド判定結果・シグナルレンジ・閾値の保存 | ◯ | `src/generate-signal.ts:155` | JSON内にconfidence含む |
 
 ---
@@ -80,12 +80,12 @@
 
 | 要件 | 状態 | 実装箇所 | 備考 |
 |------|------|---------|------|
-| 8.5.1 中確信バンド（P80-P89）のみLLM審査 | ✕ | — | デュアルバンド判定・LLM API連携が必要 |
-| 8.5.2 ニュース要約・セクター関連性判定 | ✕ | — | 外部API連携が必要 |
-| 8.5.2 イベント支配日の判定補助 | ✕ | — | |
-| 8.5.3 高確信バンドの自動通過を覆さない | — | — | 設計制約。実装時に担保 |
-| 8.5.5 判定カテゴリ出力（追い風/中立/逆風/無効） | ✕ | — | |
-| 8.5.6 構造化出力（JSON） | ✕ | — | |
+| 8.5.1 中確信バンド（P80-P89）のみLLM審査 | ◯ | `src/trade-decision.ts` makeTradeDecision | medium bandのみLLM呼び出し |
+| 8.5.2 ニュース要約・セクター関連性判定 | ◯ | `src/news.ts`, `src/llm.ts` | Finnhub(EN) + Google News RSS(JP)の2段構成。LLMプロンプトに注入 |
+| 8.5.2 イベント支配日の判定補助 | ◯ | `src/news.ts`, `src/llm.ts` | 直近24hニュースをLLMに提供。イベント判断はLLMに委任 |
+| 8.5.3 高確信バンドの自動通過を覆さない | ◯ | `src/trade-decision.ts` | high band→LLMスキップ→自動通過 |
+| 8.5.5 判定カテゴリ出力（追い風/中立/逆風/無効） | ◯ | `src/llm.ts` LLMJudgment | tailwind/neutral/headwind/invalid |
+| 8.5.6 構造化出力（JSON） | ◯ | `src/llm.ts` LLMResult | JSON構造化出力。sectorNotes含む |
 
 ---
 
@@ -93,11 +93,11 @@
 
 | 要件 | 状態 | 実装箇所 | 備考 |
 |------|------|---------|------|
-| 8.6.1 高確信バンド → 自動通過 → 機械フィルター → 執行 | △ | `src/signal.ts:259` | 確信度通過は実装済み。デュアルバンド分岐・機械フィルター連携は未実装 |
-| 8.6.1 中確信バンド → LLM審査 → サイズ決定 | ✕ | — | LLM連携が必要 |
-| 8.6.1 低確信 → 見送り | △ | `src/signal.ts:259` | 単一閾値での見送りとして機能 |
-| 8.6.2 見送り理由記録 | ◯ | `src/signal.ts:259` | ConfidenceResult.reason |
-| 8.6.2 サイズ決定ロジック（通常/半サイズ）保存 | ✕ | — | LLM判定結果に依存 |
+| 8.6.1 高確信バンド → 自動通過 → 機械フィルター → 執行 | ◯ | `src/trade-decision.ts` | high→auto-pass, normal size |
+| 8.6.1 中確信バンド → LLM審査 → サイズ決定 | ◯ | `src/trade-decision.ts` | medium→LLM→tailwind:normal/neutral:half/headwind:skip |
+| 8.6.1 低確信 → 見送り | ◯ | `src/trade-decision.ts` | low→skip |
+| 8.6.2 見送り理由記録 | ◯ | `src/trade-decision.ts` | TradeDecision.skipReason |
+| 8.6.2 サイズ決定ロジック（通常/半サイズ）保存 | ◯ | `src/trade-decision.ts` | TradeDecision.size/sizeMultiplier, signals.jsonに保存 |
 
 ---
 
@@ -119,10 +119,10 @@
 | 要件 | 状態 | 実装箇所 | 備考 |
 |------|------|---------|------|
 | 8.10.1 シグナル生成結果保存 | ◯ | `src/generate-signal.ts:155` | output/signals.json |
-| 8.10.1 バンド判定結果保存 | △ | `src/generate-signal.ts:155` | 単一閾値の判定は保存済み。P80/P90デュアル判定は未対応 |
+| 8.10.1 バンド判定結果保存 | ◯ | `src/generate-signal.ts` | P80/P90デュアルバンド判定をband/thresholdHigh/thresholdLowとして保存 |
 | 8.10.1 人間可読ログ | ◯ | `src/generate-signal.ts:163` | output/latest-signal.txt |
 | 8.10.1 機械可読ログ | ◯ | `src/generate-signal.ts:155` | output/signals.json |
-| 8.10.1 LLM入出力（中確信バンドのみ） | ✕ | — | LLM機能が未実装 |
+| 8.10.1 LLM入出力（中確信バンドのみ） | ◯ | `src/generate-signal.ts`, `src/llm.ts` | latestDecision.llmResultとしてJSONに保存 |
 | 8.10.1 発注・約定・手仕舞い結果 | ✕ | — | 該当機能が未実装 |
 
 ---
@@ -147,7 +147,7 @@
 | λ (正則化) | 0.9 | 0.9 | `src/config.ts:59` |
 | q (ロング/ショート閾値) | 0.3 | 0.3 | `src/config.ts:59` |
 | 確信度パーセンタイル（高確信） | P90 | P90 (変更可) | `src/config.ts:59`, CLI --percentile |
-| 確信度パーセンタイル（中確信下限） | P80 | 未実装 | デュアルバンド対応が必要 |
+| 確信度パーセンタイル（中確信下限） | P80 | P80 (変更可) | `src/config.ts` confidencePercentileLow, CLI --percentile-low |
 
 ---
 
@@ -155,18 +155,20 @@
 
 | カテゴリ | 実装済み | 部分実装 | 未実装 | カバー率 |
 |---------|---------|---------|-------|---------|
-| 8.1 市場データ取得 | 5 | 0 | 2 | 71% |
-| 8.2 シグナル生成 (PCA_SUB) | 15 | 0 | 1 | 94% |
-| 8.3 デュアルバンド確信度判定 | 2 | 3 | 1 | 50% |
+| 8.1 市場データ取得 | 7 | 0 | 0 | 100% |
+| 8.2 シグナル生成 (PCA_SUB) | 16 | 0 | 0 | 100% |
+| 8.3 デュアルバンド確信度判定 | 6 | 0 | 0 | 100% |
 | 8.4 一次機械フィルター | 4 | 1 | 1 | 75% |
-| 8.5 LLM情報整理・信用判定 | 0 | 0 | 5 | 0% |
-| 8.6 最終売買判定 | 1 | 2 | 2 | 30% |
+| 8.5 LLM情報整理・信用判定 | 6 | 0 | 0 | 100% |
+| 8.6 最終売買判定 | 5 | 0 | 0 | 100% |
 | 8.7-8.9 執行系 | 4 | 0 | 2 | 67% |
-| 8.10 ログ・監査 | 3 | 1 | 2 | 58% |
-| **合計** | **34** | **7** | **16** | **66%** |
+| 8.10 ログ・監査 | 5 | 0 | 1 | 83% |
+| **合計** | **53** | **1** | **4** | **93%** |
 
 > シグナル生成のコアロジック（8.1～8.2）はほぼ完全に実装済み。
-> 8.3 確信度フィルターは単一閾値（P90）で動作するが、デュアルバンド（P80/P90）への拡張が必要。
+> 8.3 確信度フィルターはP80/P90デュアルバンドで動作。CLI引数で両方変更可能。
 > 8.4 一次機械フィルターはYahoo Finance APIによるリアルタイムデータ取得＋JPXスプレッド基準値＋ストレス倍率で動作。急変動検知・方向維持チェック実装済み。真のLevel2板情報（BBO）は証券会社APIが必要。
+> 8.5 LLM判定はmockプロバイダーで動作。OpenRouter経由での本番LLM利用は`LLM_PROVIDER=openrouter`で切替可能。ニュースはFinnhub(EN)+Google News RSS(JP)の2段構成で取得しLLMプロンプトに注入。
+> 8.6 最終売買判定はデュアルバンド→LLM→サイズ決定の全フローを実装。§8.4機械フィルターとの統合はcheck-market.tsで実現。
 > 8.7 寄り後確認は方向維持チェック・時刻警告・急変動検知を実装。§8.4と論理分離済み。
-> 未実装部分は主にデュアルバンド分岐、LLM連携、発注・手仕舞い系に集中している。
+> 未実装部分は主に発注・手仕舞い系と外部ニュースAPI連携に集中している。
