@@ -34,6 +34,8 @@ function parseArgs() {
   let opensCsv = "data/opens.csv";
   let percentile = DEFAULT_PARAMS.confidencePercentile;
   let output = "output/backtest";
+  let start = "";
+  const exclude: string[] = [];
 
   for (let i = 0; i < args.length; i++) {
     switch (args[i]) {
@@ -41,9 +43,11 @@ function parseArgs() {
       case "--opens": opensCsv = args[++i]; break;
       case "--percentile": percentile = Number(args[++i]); break;
       case "--output": output = args[++i]; break;
+      case "--start": start = args[++i]; break;
+      case "--exclude": exclude.push(...args[++i].split(",")); break;
     }
   }
-  return { csv, opensCsv, percentile, output };
+  return { csv, opensCsv, percentile, output, start, exclude };
 }
 
 // ---------------------------------------------------------------------------
@@ -160,18 +164,25 @@ function percentile(arr: number[], p: number): number {
 // Main backtest
 // ---------------------------------------------------------------------------
 async function main() {
-  const { csv, opensCsv, percentile: pct, output } = parseArgs();
+  const { csv, opensCsv, percentile: pct, output, start, exclude } = parseArgs();
 
   console.log("=== PCA_SUB Backtest ===");
   console.log(`Data: ${csv}, Opens: ${opensCsv}`);
+  if (start) console.log(`Start filter: ${start}`);
+  if (exclude.length) console.log(`Excluded tickers: ${exclude.join(", ")}`);
   console.log(`Params: L=${DEFAULT_PARAMS.L}, K=${DEFAULT_PARAMS.K}, λ=${DEFAULT_PARAMS.lambda}, q=${DEFAULT_PARAMS.q}`);
   console.log(`Confidence: P${pct}`);
   console.log("");
 
   // 1. Load data
-  const prices = loadClosesFromCsv(csv);
+  let prices = loadClosesFromCsv(csv);
+  if (start) {
+    prices = prices.filter((p) => p.date >= start);
+  }
   const allTickers = [...US_TICKERS, ...JP_TICKERS] as unknown as string[];
-  const activeTickers = allTickers.filter((t) => prices.some((p) => p.ticker === t));
+  const activeTickers = allTickers.filter((t) =>
+    !exclude.includes(t) && prices.some((p) => p.ticker === t),
+  );
 
   // Compute returns manually
   const byTicker = new Map<string, { date: string; close: number }[]>();
@@ -417,6 +428,8 @@ async function main() {
   log("═══════════════════════════════════════════════════════");
 
   const subPeriods = [
+    { name: "2010-2012", start: "2010-01-01", end: "2012-12-31" },
+    { name: "2013-2014", start: "2013-01-01", end: "2014-12-31" },
     { name: "2015-2017", start: "2015-01-01", end: "2017-12-31" },
     { name: "2018-2020", start: "2018-01-01", end: "2020-12-31" },
     { name: "2021-2023", start: "2021-01-01", end: "2023-12-31" },
