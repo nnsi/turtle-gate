@@ -75,23 +75,31 @@ export function buildPriorSubspace(tickers: string[]): number[][] {
 
 /**
  * Standardize data within a window: z = (x - mean) / std for each column.
+ *
+ * Stats (mean, population std) are computed from the first T-1 rows only
+ * (past data, Wt = {t-L, ..., t-1}). The last row (today) is standardized
+ * using those stats but excluded from their computation to avoid look-ahead.
  */
 function standardizeWindow(windowData: number[][]): number[][] {
   const T = windowData.length;
   const N = windowData[0].length;
+  const pastT = T - 1; // number of past observations (exclude today)
   const means = new Array(N).fill(0);
   const stds = new Array(N).fill(0);
 
-  for (let t = 0; t < T; t++) {
+  // Compute means from past data only (first T-1 rows)
+  for (let t = 0; t < pastT; t++) {
     for (let i = 0; i < N; i++) means[i] += windowData[t][i];
   }
-  for (let i = 0; i < N; i++) means[i] /= T;
+  for (let i = 0; i < N; i++) means[i] /= pastT;
 
-  for (let t = 0; t < T; t++) {
+  // Population std from past data only (divide by L, not L-1)
+  for (let t = 0; t < pastT; t++) {
     for (let i = 0; i < N; i++) stds[i] += (windowData[t][i] - means[i]) ** 2;
   }
-  for (let i = 0; i < N; i++) stds[i] = Math.sqrt(stds[i] / (T - 1));
+  for (let i = 0; i < N; i++) stds[i] = Math.sqrt(stds[i] / pastT);
 
+  // Standardize ALL rows (including today) using past-only stats
   return windowData.map((row) =>
     row.map((x, i) => (stds[i] > 1e-12 ? (x - means[i]) / stds[i] : 0)),
   );
@@ -100,29 +108,33 @@ function standardizeWindow(windowData: number[][]): number[][] {
 /**
  * Generate signal for a single date given the rolling window data.
  *
- * @param windowData - L rows × N columns of CC returns (most recent row is "today")
+ * @param windowData - (L+1) rows × N columns of CC returns. First L rows are
+ *   past data (Wt), last row is "today". Stats are computed from past only.
  * @param tickers - ordered ticker list matching columns
  * @param params - PCA_SUB parameters
+ * @param Cfull - full correlation matrix estimated from long-term data (§8.2.1)
  * @returns signal for each JP ticker
  */
 export function generateSignalForDate(
   windowData: number[][],
   tickers: string[],
   params: SignalParams,
+  Cfull: number[][],
 ): { signals: Record<string, number>; factorScores: number[] } {
   const N = tickers.length;
   const nUS = tickers.filter((t) => (US_TICKERS as readonly string[]).includes(t)).length;
   const nJP = N - nUS;
 
-  // 1. Standardize within window
+  // 1. Standardize: stats from first L rows (past), apply to all L+1 rows
   const stdData = standardizeWindow(windowData);
 
-  // 2. Compute sample correlation matrix Ct
-  const Ct = correlationMatrix(stdData);
+  // 2. Compute sample correlation matrix Ct from past data only (exclude today)
+  const stdPast = stdData.slice(0, stdData.length - 1);
+  const Ct = correlationMatrix(stdPast);
 
-  // 3. Build prior subspace and C0
+  // 3. Build prior subspace and C0 using Cfull (paper equations 10-12)
   const priorVecs = buildPriorSubspace(tickers);
-  const C0 = priorCorrelationFromSubspace(priorVecs);
+  const C0 = priorCorrelationFromSubspace(priorVecs, Cfull);
 
   // 4. Regularize: Creg = (1-λ)Ct + λC0
   const Creg = regularizeCorrelation(Ct, C0, params.lambda);
@@ -198,29 +210,37 @@ export function computeSignalRange(
 
 /**
  * Run signal generation over the full return matrix.
+ *
+ * @param Cfull - full correlation matrix from long-term estimation period (§8.2.1).
  */
 export function generateSignals(
   dates: string[],
   matrix: number[][],
   tickers: string[],
   params: SignalParams = DEFAULT_PARAMS,
+  Cfull: number[][],
 ): SignalResult[] {
   const results: SignalResult[] = [];
 
-  for (let t = params.L; t < dates.length; t++) {
-    const windowData = matrix.slice(t - params.L, t);
+  // Window: L past days + today = L+1 rows.
+  // t indexes "today" in the matrix (0-based). Need t >= L so that
+  // matrix[t-L .. t] has L+1 rows.
+  for (let t = params.L; t < matrix.length; t++) {
+    // L+1 rows: past L days [t-L, ..., t-1] + today [t]
+    const windowData = matrix.slice(t - params.L, t + 1);
 
     const { signals, factorScores } = generateSignalForDate(
       windowData,
       tickers,
       params,
+      Cfull,
     );
 
     const { longCandidates, shortCandidates } = selectCandidates(signals, params.q);
     const signalRange = computeSignalRange(signals, longCandidates, shortCandidates);
 
     results.push({
-      date: dates[t - 1],
+      date: dates[t],
       signals,
       longCandidates,
       shortCandidates,
@@ -244,8 +264,6 @@ export function applyConfidenceFilter(
   const pastRanges: number[] = [];
 
   for (const sr of signalResults) {
-    pastRanges.push(sr.signalRange);
-
     // Need at least some history to compute percentile
     if (pastRanges.length < 20) {
       results.push({
@@ -255,10 +273,12 @@ export function applyConfidenceFilter(
         isTradeDay: false,
         reason: "Insufficient history for confidence filter",
       });
+      pastRanges.push(sr.signalRange);
       continue;
     }
 
-    // Compute percentile threshold from all past data (expanding window)
+    // Compute percentile threshold from past data only (expanding window,
+    // excluding today to avoid look-ahead bias per §8.3.4)
     const sorted = [...pastRanges].sort((a, b) => a - b);
     const idx = Math.floor((percentile / 100) * (sorted.length - 1));
     const threshold = sorted[idx];
@@ -272,6 +292,9 @@ export function applyConfidenceFilter(
       isTradeDay,
       reason: isTradeDay ? undefined : `Signal range ${sr.signalRange.toFixed(4)} < threshold ${threshold.toFixed(4)}`,
     });
+
+    // Push today's range AFTER threshold computation
+    pastRanges.push(sr.signalRange);
   }
 
   return results;

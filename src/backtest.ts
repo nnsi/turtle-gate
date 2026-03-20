@@ -21,7 +21,8 @@ import {
   type SignalResult,
   type ConfidenceResult,
 } from "./signal.js";
-import { DEFAULT_PARAMS, JP_SECTOR_NAMES, US_TICKERS, JP_TICKERS } from "./config.js";
+import { correlationMatrix } from "./linalg.js";
+import { DEFAULT_PARAMS, JP_SECTOR_NAMES, US_TICKERS, JP_TICKERS, CFULL_START, CFULL_END } from "./config.js";
 import * as fs from "node:fs";
 
 // ---------------------------------------------------------------------------
@@ -168,9 +169,15 @@ async function main() {
   const jpTickers = tickers.filter((t) => !(US_TICKERS as readonly string[]).includes(t));
   const jpIndices = jpTickers.map((t) => tickers.indexOf(t));
 
+  // Estimate Cfull from long-term data (§8.2.1)
+  const cfullRows = matrix.filter((_, i) => dates[i] >= CFULL_START && dates[i] <= CFULL_END);
+  const cfullData = cfullRows.length >= 60 ? cfullRows : matrix;
+  const Cfull = correlationMatrix(cfullData);
+  console.log(`Cfull estimated from ${cfullData.length} rows`);
+
   // 2. Generate signals
   console.log("Generating signals...");
-  const signals = generateSignals(dates, matrix, tickers, DEFAULT_PARAMS);
+  const signals = generateSignals(dates, matrix, tickers, DEFAULT_PARAMS, Cfull);
   console.log(`Signal dates: ${signals.length}`);
 
   // 3. Confidence filter
