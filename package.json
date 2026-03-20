@@ -6,7 +6,8 @@
   "type": "module",
   "scripts": {
     "build": "tsc",
-    "signal": "tsx src/generate-signal.ts"
+    "signal": "tsx src/generate-signal.ts",
+    "market-check": "tsx src/check-market.ts"
   },
   "dependencies": {
     "mathjs": "^13.2.0"
