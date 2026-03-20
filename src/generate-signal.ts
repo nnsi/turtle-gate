@@ -11,7 +11,8 @@
 
 import { fetchAllData } from "./data.js";
 import { generateSignals, applyConfidenceFilter, type SignalResult } from "./signal.js";
-import { DEFAULT_PARAMS, JP_SECTOR_NAMES } from "./config.js";
+import { correlationMatrix } from "./linalg.js";
+import { DEFAULT_PARAMS, JP_SECTOR_NAMES, CFULL_START, CFULL_END } from "./config.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
@@ -109,14 +110,24 @@ async function main() {
   console.log(`  Confidence Filter: P${percentile}`);
   console.log("");
 
-  // 1. Fetch data
-  const { dates, tickers, matrix } = await fetchAllData(start, end, csv);
+  // 1. Fetch data (include Cfull estimation period if needed)
+  const dataStart = start < CFULL_START ? start : CFULL_START;
+  const { dates, tickers, matrix } = await fetchAllData(dataStart, end, csv);
   console.log(`Aligned data: ${dates.length} dates × ${tickers.length} tickers`);
+
+  // 1b. Estimate Cfull from long-term data (§8.2.1)
+  const cfullRows = matrix.filter((_, i) => dates[i] >= CFULL_START && dates[i] <= CFULL_END);
+  if (cfullRows.length < 60) {
+    console.warn(`Warning: Cfull estimation period has only ${cfullRows.length} rows (need ≥60). Using all available data.`);
+  }
+  const cfullData = cfullRows.length >= 60 ? cfullRows : matrix;
+  const Cfull = correlationMatrix(cfullData);
+  console.log(`Cfull estimated from ${cfullData.length} rows`);
   console.log("");
 
   // 2. Generate signals
   console.log("Generating signals...");
-  const signals = generateSignals(dates, matrix, tickers, DEFAULT_PARAMS);
+  const signals = generateSignals(dates, matrix, tickers, DEFAULT_PARAMS, Cfull);
   console.log(`Generated ${signals.length} signal dates`);
 
   // 3. Apply confidence filter

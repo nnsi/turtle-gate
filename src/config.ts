@@ -63,3 +63,7 @@ export const DEFAULT_PARAMS: SignalParams = {
   q: 0.3,
   confidencePercentile: 90,
 };
+
+/** Cfull estimation period (§8.2.1): 2010-01 to 2014-12 */
+export const CFULL_START = "2010-01-01";
+export const CFULL_END = "2014-12-31";

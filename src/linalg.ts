@@ -26,7 +26,7 @@ export function correlationMatrix(data: number[][]): number[][] {
       stds[i] += (data[t][i] - means[i]) ** 2;
     }
   }
-  for (let i = 0; i < N; i++) stds[i] = Math.sqrt(stds[i] / (T - 1));
+  for (let i = 0; i < N; i++) stds[i] = Math.sqrt(stds[i] / T);
 
   // Standardize and compute correlation
   const corr: number[][] = Array.from({ length: N }, () => new Array(N).fill(0));
@@ -39,7 +39,7 @@ export function correlationMatrix(data: number[][]): number[][] {
         const xj = (data[t][j] - means[j]) / (stds[j] || 1e-12);
         s += xi * xj;
       }
-      corr[i][j] = s / (T - 1);
+      corr[i][j] = s / T;
       corr[j][i] = corr[i][j];
     }
   }
@@ -66,18 +66,41 @@ export function regularizeCorrelation(
 }
 
 /**
- * Build prior correlation matrix C0 from prior subspace vectors.
- * C0 = V_prior @ V_prior^T (projection onto prior subspace).
+ * Build prior correlation matrix C0 from prior subspace vectors and full
+ * correlation matrix (paper §8.2, equations 10-12).
+ *
+ * 1. D0 = diag(v_k' Cfull v_k)  — eigenvalue scale along each prior direction
+ * 2. C0_raw = Σ_k d_k * v_k v_k'
+ * 3. Normalize to correlation matrix: C0[i][j] = C0_raw[i][j] / √(C0_raw[i][i] C0_raw[j][j])
  */
-export function priorCorrelationFromSubspace(priorVectors: number[][]): number[][] {
+export function priorCorrelationFromSubspace(
+  priorVectors: number[][],
+  Cfull: number[][],
+): number[][] {
   const N = priorVectors[0].length;
   const C0: number[][] = Array.from({ length: N }, () => new Array(N).fill(0));
 
   for (const v of priorVectors) {
+    // d_k = v' Cfull v
+    let dk = 0;
     for (let i = 0; i < N; i++) {
       for (let j = 0; j < N; j++) {
-        C0[i][j] += v[i] * v[j];
+        dk += v[i] * Cfull[i][j] * v[j];
       }
+    }
+    // C0 += d_k * v v'
+    for (let i = 0; i < N; i++) {
+      for (let j = 0; j < N; j++) {
+        C0[i][j] += dk * v[i] * v[j];
+      }
+    }
+  }
+
+  // Normalize to correlation matrix
+  const diagSqrt = C0.map((row, i) => Math.sqrt(Math.max(row[i], 1e-12)));
+  for (let i = 0; i < N; i++) {
+    for (let j = 0; j < N; j++) {
+      C0[i][j] /= diagSqrt[i] * diagSqrt[j];
     }
   }
 
