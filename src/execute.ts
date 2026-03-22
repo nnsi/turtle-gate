@@ -16,11 +16,12 @@
 import { getBroker } from "./broker.js";
 import { POSITION_SIZE_JPY, MAX_TOTAL_POSITION_JPY, MAX_SIDE_COUNT, JP_SECTOR_NAMES } from "./config.js";
 import { resolveCandidates, expandToBasket, executeOrders, getVixRegimeMultiplier } from "./execute-helpers.js";
+import { checkGapFilter } from "./gap-filter.js";
 import { getDb, upsertExecution } from "./trade-history.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
-type Args = { marketCheckFile: string; outputDir: string; positionSize: number; basket: boolean; noVixRegime: boolean };
+type Args = { marketCheckFile: string; outputDir: string; positionSize: number; basket: boolean; noVixRegime: boolean; noGapFilter: boolean };
 
 function parseArgs(): Args {
   const args = process.argv.slice(2);
@@ -29,18 +30,20 @@ function parseArgs(): Args {
   let positionSize = POSITION_SIZE_JPY;
   let basket = false;
   let noVixRegime = false;
+  let noGapFilter = false;
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--market-check") marketCheckFile = args[++i];
     else if (args[i] === "--output") outputDir = args[++i];
     else if (args[i] === "--size") positionSize = Number(args[++i]);
     else if (args[i] === "--basket") basket = true;
     else if (args[i] === "--no-vix-regime") noVixRegime = true;
+    else if (args[i] === "--no-gap-filter") noGapFilter = true;
   }
-  return { marketCheckFile, outputDir, positionSize, basket, noVixRegime };
+  return { marketCheckFile, outputDir, positionSize, basket, noVixRegime, noGapFilter };
 }
 
 async function main() {
-  const { marketCheckFile, outputDir, positionSize, basket, noVixRegime } = parseArgs();
+  const { marketCheckFile, outputDir, positionSize, basket, noVixRegime, noGapFilter } = parseArgs();
 
   if (!fs.existsSync(marketCheckFile)) {
     console.error(`market-check.json が見つかりません: ${marketCheckFile}`);
@@ -90,6 +93,24 @@ async function main() {
   console.log(`Effective size multiplier: ×${effectiveMultiplier}`);
   console.log("");
 
+  // Gap filter (F-5): skip if overnight gap already consumed alpha
+  const postOpenResults: any[] = checkData.postOpenResults ?? [];
+  const quotes: Record<string, any> = checkData.quotes ?? {};
+  if (!noGapFilter && postOpenResults.length > 0) {
+    const gapResult = checkGapFilter(postOpenResults, quotes);
+    const dir = gapResult.strategyGapBps >= 0 ? "+" : "";
+    console.log(`Gap Filter: strategy gap = ${dir}${gapResult.strategyGapBps.toFixed(1)}bps (threshold: ±${gapResult.thresholdBps}bps)`);
+    if (gapResult.skip) {
+      console.log(`Gap Filter: SKIP — overnight gap too large, OC alpha likely consumed`);
+      return;
+    }
+    console.log(`Gap Filter: PASS`);
+    console.log("");
+  } else if (noGapFilter) {
+    console.log("Gap Filter: disabled (--no-gap-filter)");
+    console.log("");
+  }
+
   // Resolve final candidates (sector level — limits applied here)
   const sectorCandidates = resolveCandidates(checkData, positionSize, effectiveMultiplier);
   if (sectorCandidates.length === 0) {
@@ -98,7 +119,6 @@ async function main() {
   }
 
   // Expand to individual stocks when --basket is active
-  const quotes: Record<string, any> = checkData.quotes ?? {};
   const candidates = basket ? expandToBasket(sectorCandidates, quotes) : sectorCandidates;
   if (basket && candidates.length === 0) {
     console.log("発注対象なし (バスケット展開後に有効な銘柄なし)");
