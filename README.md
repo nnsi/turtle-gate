@@ -1,8 +1,20 @@
 # turtle-gate
 
-米国先行セクター情報 + LLMフィルター型 日本市場短期売買システム。
+米国先行セクター情報を用いた日本市場短期売買システム。
 
-米国セクターETF 11銘柄の日次リターンから PCA_SUB モデルで日本 TOPIX-17 業種 ETF の売買シグナルを生成し、確信度デュアルバンド判定（P90 自動通過 / P80-P89 LLM審査 / P80未満 見送り）で取引日を選別する。当日引けで手仕舞いするデイトレード方式。
+PCA_SUB モデルで米国セクターETF 11銘柄の日次リターンから日本市場の売買シグナルを生成し、**個別株バスケット**（各セクター上位3銘柄）で執行する。確信度フィルターで取引日を選別し、当日引けで手仕舞いするデイトレード方式。
+
+---
+
+## 戦略の概要
+
+```
+米国市場終了 → PCA_SUBシグナル生成 → 確信度フィルター → 個別株バスケットに展開 → 執行 → 引け手仕舞い
+```
+
+**アルファの源泉**: 米国セクター→日本業種間のリードラグ（1日遅れの伝播）を PCA_SUB で捕捉。Day 1 CC α = 21.9bps (t=10.06)。
+
+**なぜ個別株バスケットか**: TOPIX-17 セクターETFは流動性が低く（日次出来高 ¥1,100万-¥6,700万）、PTS取引実績ゼロ。個別株（トヨタ、三菱UFJ等）なら PTS で前倒し執行でき、OC/CC 比率を改善できる。バックテストではバスケット執行のアルファが ETF の 136% に増幅される（P90 α=68.7bps, t=6.40）。
 
 ---
 
@@ -12,7 +24,7 @@
 npm install
 ```
 
-データ取得（オプション、CSV を事前に用意する場合）:
+データ取得（オプション）:
 
 ```bash
 python scripts/fetch-data.py
@@ -22,24 +34,43 @@ python scripts/fetch-data.py
 
 ## 運用パイプライン
 
-毎営業日、以下の順序で実行する。各ステップは独立した CLI で、前のステップの出力ファイルを入力にとる。
+### ETFモード（従来）
 
 ```
-06:00  generate-signal   シグナル生成 + バンド判定 + LLM審査
+06:00  generate-signal   シグナル生成 + バンド判定
 08:45  check-market       リアルタイム気配取得 + 機械フィルター
-09:10  execute            発注
+09:10  execute            発注（セクターETF）
 14:50  unwind             手仕舞い
 15:00  daily-report       日次統合レポート
 15:05  run-monitor        運用監視 + ゲート/フェーズ判定
 ```
 
+### バスケットモード（新）
+
+```
+06:00  generate-signal   シグナル生成 + バンド判定
+08:45  check-market       リアルタイム気配取得 + 機械フィルター
+09:10  execute --basket   発注（個別株バスケット）
+14:50  unwind             手仕舞い（個別株ポジション自動検出）
+15:00  daily-report       日次統合レポート
+15:05  run-monitor        運用監視 + ゲート/フェーズ判定
+```
+
+### 自動実行
+
+```bash
+bash scripts/daily-basket-paper.sh
+```
+
+Windowsタスクスケジューラへの登録手順は `scripts/setup-task-scheduler.md` を参照。
+
 ---
 
 ## コマンド一覧
 
-### 1. generate-signal — シグナル生成
+### generate-signal — シグナル生成
 
-PCA_SUB モデルでシグナルを生成し、デュアルバンド確信度判定を行う。中確信バンド（P80-P89）の日は LLM が審査する。
+PCA_SUB モデルでシグナルを生成し、デュアルバンド確信度判定を行う。
 
 ```bash
 npx tsx src/generate-signal.ts [options]
@@ -52,190 +83,99 @@ npx tsx src/generate-signal.ts [options]
 | `--csv PATH` | — | CSV ファイルパス（省略時は Yahoo Finance API） |
 | `--percentile N` | 90 | 高確信バンド閾値 |
 | `--percentile-low N` | 80 | 中確信バンド下限閾値 |
-| `--L N` | 60 | ローリングウィンドウ長（営業日） |
-| `--K N` | 3 | 主成分数 |
-| `--lambda N` | 0.9 | 正則化パラメータ |
-| `--q N` | 0.3 | ロング/ショート選択割合 |
-| `--phase PHASE` | normal | 運用フェーズ（後述） |
+| `--phase PHASE` | normal | 運用フェーズ |
 | `--output DIR` | output | 出力ディレクトリ |
 
-**出力:**
-- `output/signals.json` — 全日シグナル + 確信度 + 中間データ + LLM 入出力
-- `output/latest-signal.txt` — 直近日の人間可読レポート
-- `output/trade-days.txt` — 取引候補日一覧
-- `output/trade-history.db` — SQLite に当日のシグナル結果を記録
+### check-market — リアルタイム市場チェック
 
-**環境変数:**
-- `LLM_PROVIDER=mock|openrouter` — LLM プロバイダ（デフォルト: mock）
-- `OPENROUTER_API_KEY` — OpenRouter 利用時に必要
-- `FINNHUB_API_KEY` — ニュース取得用（省略可）
-- `PHASE=paper|p90_only|p90_plus_llm|normal` — `--phase` の代替
-
----
-
-### 2. check-market — リアルタイム市場チェック
-
-日本市場の寄り後にリアルタイム気配を取得し、一次機械フィルター（スプレッド・異常値・急変動・流動性）と寄り後方向維持チェックを実行する。
+寄り後にリアルタイム気配を取得し、一次機械フィルター（スプレッド・異常値・急変動・流動性）を実行する。
 
 ```bash
-npx tsx src/check-market.ts [options]
+npx tsx src/check-market.ts [--signal-file PATH] [--output DIR] [--check-time HH:MM] [--level2]
 ```
 
-| オプション | デフォルト | 説明 |
-|-----------|----------|------|
-| `--signal-file PATH` | output/signals.json | シグナルファイル |
-| `--output DIR` | output | 出力ディレクトリ |
-| `--check-time HH:MM` | 09:10 | 基準時刻（JST） |
-| `--level2` | — | BrokerPort 経由で Level2 板情報を取得 |
+### execute — 発注
 
-**出力:**
-- `output/market-check.json` — 気配値 + フィルター結果 + BBOスナップショット + 売買判定
-
-**機械フィルターのチェック項目:**
-1. 取引停止（出来高 0）
-2. BBOスプレッド（Level2 → bid/ask → JPX基準の3段フォールバック）
-3. 異常値（前日比 5% 超）
-4. 直近急変動（10分間の max swing > 0.5%）
-5. 流動性（Level2 板厚み、BrokerPort 接続時のみ）
-
----
-
-### 3. execute — 発注
-
-market-check.json の結果に基づき、全フィルター通過銘柄の発注を行う。
+market-check.json の結果に基づき発注する。`--basket` で個別株バスケット執行。
 
 ```bash
-npx tsx src/execute.ts [options]
+npx tsx src/execute.ts [--market-check PATH] [--output DIR] [--size JPY] [--basket]
 ```
 
 | オプション | デフォルト | 説明 |
 |-----------|----------|------|
 | `--market-check PATH` | output/market-check.json | 市場チェック結果 |
-| `--output DIR` | output | 出力ディレクトリ |
-| `--size JPY` | 1,000,000 | 1銘柄あたりのポジション金額 |
+| `--size JPY` | 1,000,000 | 1セクターあたりのポジション金額 |
+| `--basket` | — | 個別株バスケットモード |
 
-**ポジション制御:**
-- 1銘柄: `POSITION_SIZE_JPY`（100万円）
-- 売買総額上限: `MAX_TOTAL_POSITION_JPY`（1,000万円）
-- 片側銘柄数上限: `MAX_SIDE_COUNT`（5銘柄）
-- 市場休場時（marketState=CLOSED）は自動ブロック
+バスケットモードでは、セクター候補を `basket.ts` の定義に従い個別株に展開する。各銘柄はセクター金額の 1/3 を受け取る。
 
-**出力:**
-- `output/execution-results.json` — 発注結果
-- `output/trade-history.db` — SQLite にスプレッドコストを記録
+### unwind — 手仕舞い
 
-**環境変数:**
-- `BROKER_PROVIDER=mock|kabu` — ブローカー（デフォルト: mock = dry-run）
-- `KABU_API_URL` — kabu Station API URL
-- `KABU_API_PASSWORD` — kabu Station 認証パスワード
-
----
-
-### 4. unwind — 手仕舞い
-
-全ポジションを手仕舞いする。14:50-15:00 JST の時刻帯チェック付き。
+全ポジションを手仕舞いする。バスケットポジションはセクター別にグループ表示。
 
 ```bash
-npx tsx src/unwind.ts [options]
+npx tsx src/unwind.ts [--output DIR] [--force]
 ```
 
-| オプション | デフォルト | 説明 |
-|-----------|----------|------|
-| `--output DIR` | output | 出力ディレクトリ |
-| `--force` | — | 時刻帯チェックを無視して強制実行 |
-
-**安全機能:**
-- 非取引日（signals.json の判定が skip）にポジション残存があれば自動手仕舞い
-- 時刻帯外は `--force` なしでは実行しない
-
-**出力:**
-- `output/unwind-results.json` — 手仕舞い結果
-- `output/trade-history.db` — SQLite に実現リターンを記録
-
----
-
-### 5. daily-report — 日次統合レポート
-
-当日の全出力ファイルを1つの統合レポートにまとめる。
+### daily-report — 日次統合レポート
 
 ```bash
 npx tsx src/daily-report.ts [--output DIR]
 ```
 
-**出力:**
-- `output/daily-report-YYYY-MM-DD.json` — 統合レポート
-
-**含まれる情報:**
-米国市場概況、シグナルレンジ・バンド判定、候補銘柄、LLM 判定結果（中確信のみ）、機械フィルター結果、BBOスナップショット、推定コスト、発注結果、手仕舞い結果
-
----
-
-### 6. run-monitor — 運用監視
-
-trade-history.db の蓄積データからシステムの健全性を評価する。
+### run-monitor — 運用監視
 
 ```bash
-npx tsx src/run-monitor.ts [options]
+npx tsx src/run-monitor.ts [--db PATH] [--phase PHASE] [--output DIR]
+```
+
+### backtest — バックテスト
+
+```bash
+npx tsx src/backtest.ts --csv data/closes.csv [--percentile 90] [--basket --stocks-csv data/stocks.csv]
 ```
 
 | オプション | デフォルト | 説明 |
 |-----------|----------|------|
-| `--db PATH` | output/trade-history.db | SQLite ファイル |
-| `--phase PHASE` | normal | 現在のフェーズ |
-| `--output DIR` | output | 出力ディレクトリ |
-
-**監視項目:**
-- バンド別通過率（直近60日）
-- LLM 判定品質（通過日 α > 15bps, 除外日 α < 10bps, 差 > 5bps）
-- コスト控除後累積リターン推移（連続20営業日マイナスで halt）
-- 月次スプレッド監視（12ヶ月平均 > 10bps → P85/P95 引上げ提案）
-- Q5 vs Q1 モノトニシティ（Q5 < Q1 で halt）
-- グロス R/R（3ヶ月連続 < 0.5 で Cfull 再検討推奨）
-
-**ゲート条件（G1-G4）:**
-- G1: JPX 12ヶ月MA スプレッド ≤ 10bps
-- G2: ライブスプレッド / JPX 基準の乖離 ≤ 1.5倍
-- G3: ペーパートレード 20営業日 + コスト控除後リターン > 0
-- G4: 20営業日連続で異常なし
-
-**推奨アクション:** `continue` / `degrade_to_p90` / `disable_llm` / `halt`
-
-halt 時は exit code 1 を返す（cron 連携向け）。
-
-**出力:**
-- `output/monitor-report.json` — 監視レポート
-
----
-
-### 7. backtest — バックテスト
-
-過去データでの戦略評価。デュアルバンド対応。
-
-```bash
-npx tsx src/backtest.ts [options]
-```
-
-| オプション | デフォルト | 説明 |
-|-----------|----------|------|
-| `--csv PATH` | — | CSV ファイルパス（必須） |
+| `--csv PATH` | — | ETF価格CSV（必須） |
 | `--percentile N` | 90 | 高確信バンド閾値 |
-| `--percentile-low N` | 80 | 中確信バンド下限閾値 |
-| `--output DIR` | output | 出力ディレクトリ |
+| `--basket` | — | バスケットリターンで評価 |
+| `--stocks-csv PATH` | — | 個別株価格CSV（`--basket` 時必須） |
 
-**出力内容:**
-- バンド別成績（HIGH / MEDIUM / Combined）
-- コスト感応度（0, 3, 5, 8, 10, 15 bps）
-- 五分位分析（サブ期間別）
-- OOS検証（IS:2015-2019 → OOS:2020-2025）
-- 逆選択検証（Welch t検定）
-- 年次パフォーマンス + OC/CC 比率
-- アルファ減衰（Day 1-10）
+---
+
+## 個別株バスケット
+
+### セクター → 銘柄マッピング（`src/basket.ts`）
+
+各 TOPIX-17 セクターの時価総額上位3銘柄で構成。均等加重（各 1/3）。
+
+| セクター | ETF | 銘柄1 | 銘柄2 | 銘柄3 | PTS |
+|---------|-----|-------|-------|-------|:---:|
+| 食品 | 1617.T | JT | 味の素 | アサヒGHD | B |
+| エネルギー | 1618.T | ENEOS | INPEX | 出光興産 | A |
+| 建設・資材 | 1619.T | 大和ハウス | 積水ハウス | 鹿島建設 | C |
+| 素材・化学 | 1620.T | 信越化学 | 富士フイルム | 花王 | B |
+| 医薬品 | 1621.T | 武田薬品 | 第一三共 | 中外製薬 | C |
+| 自動車 | 1622.T | トヨタ | ホンダ | デンソー | A |
+| 鉄鋼・非鉄 | 1623.T | 日本製鉄 | 住友電工 | フジクラ | B |
+| 機械 | 1624.T | 三菱重工 | コマツ | ダイキン | A |
+| 電機・精密 | 1625.T | ソニーG | 日立 | 東京エレクトロン | B |
+| 情報通信 | 1626.T | 任天堂 | リクルート | SBG | A |
+| 電気・ガス | 1627.T | 東京ガス | 関西電力 | 大阪ガス | D |
+| 運輸・物流 | 1628.T | JR東日本 | JR東海 | 日本郵船 | C |
+| 商社・卸売 | 1629.T | 三菱商事 | 伊藤忠 | 三井物産 | A |
+| 小売 | 1630.T | ファストリ | セブン&アイ | イオン | D |
+| 銀行 | 1631.T | 三菱UFJ | 三井住友FG | みずほFG | A |
+| 金融(除銀行) | 1632.T | 東京海上 | MS&AD | SOMPO | C |
+| 不動産 | 1633.T | 三井不動産 | 三菱地所 | 住友不動産 | C |
+
+**PTS分類**: A=PTS執行可、B=条件付き、C=困難、D=不可
 
 ---
 
 ## 運用フェーズ
-
-`--phase` または `PHASE` 環境変数で段階的にリスクを上げていく。
 
 | フェーズ | 構成 | LLM | 目的 |
 |---------|------|:---:|------|
@@ -243,8 +183,6 @@ npx tsx src/backtest.ts [options]
 | `p90_only` | P90 のみ | OFF | 高確信バンド単体の実績確認 |
 | `p90_plus_llm` | P90 + P80-P89 LLM審査 | ON | LLM 付加価値の検証 |
 | `normal` | Phase 3 と同一 | ON | 通常運用 |
-
-`run-monitor` が G1-G4 ゲート条件とフェーズ昇格判定を自動で行う。
 
 ---
 
@@ -254,10 +192,28 @@ npx tsx src/backtest.ts [options]
 
 | 値 | 説明 |
 |----|------|
-| `mock` (デフォルト) | dry-run。発注はコンソール出力のみ。ポジションはメモリ管理 |
-| `kabu` | kabu Station API 接続。要 `KABU_API_URL` + `KABU_API_PASSWORD` |
+| `mock` (デフォルト) | dry-run。発注はコンソール出力のみ |
+| `kabu` | kabu Station API 接続 |
 
-mock で全パイプラインの動作確認が可能。本番接続時は `BROKER_PROVIDER=kabu` に切り替えるだけ。
+---
+
+## バックテスト成績（2015-2025）
+
+### ETF執行
+
+| フィルター | 取引日/年 | Gross AR | R/R | MDD | BE(bps) |
+|-----------|---------|---------|-----|-----|---------|
+| P75 | 394 | 12.6% | 2.16 | -5.1% | 11.0 |
+| P90 | 161 | 7.8% | 1.80 | -3.7% | 16.6 |
+
+### バスケット執行（EW-3, CC returns）
+
+| フィルター | α(bps/day) | t値 | AR% | R/R |
+|-----------|-----------|-----|-----|-----|
+| P90 | 68.7 | 6.40 | 173.2 | 8.64 |
+| P75 | 46.9 | 8.69 | 118.3 | 7.32 |
+
+バスケット執行はETFの136%のアルファを示す。セクター内大型株がリードラグシグナルに対してETFより高い感応度を持つため。
 
 ---
 
@@ -265,12 +221,19 @@ mock で全パイプラインの動作確認が可能。本番接続時は `BROK
 
 | ファイル | 形式 | 用途 |
 |---------|------|------|
-| `output/trade-history.db` | SQLite | 日次取引実績の蓄積。run-monitor の入力 |
-| `output/signals.json` | JSON | シグナル + 確信度 + 中間データ |
-| `output/market-check.json` | JSON | 気配 + フィルター + BBO |
-| `output/*.json` | JSON | 各ステップの実行結果 |
+| `output/trade-history.db` | SQLite | 日次取引実績の蓄積 |
+| `output/signals.json` | JSON | シグナル + 確信度 |
+| `output/market-check.json` | JSON | 気配 + フィルター |
+| `output/daily-log-YYYY-MM-DD.txt` | Text | 日次パイプラインログ |
 
-trade-history.db は各 CLI ステップで自動更新される:
-- `generate-signal` → band, signalRange, LLM judgment, phase
-- `execute` → spreadCostBps, traded flag
-- `unwind` → grossReturn, netReturn
+---
+
+## ドキュメント
+
+| ファイル | 内容 |
+|---------|------|
+| `docs/require.md` | 要求定義書（原本） |
+| `docs/strategy-recommend-1.md` | 戦略提言: 個別株バスケット化 |
+| `docs/tasklist.md` | 全タスクの進捗管理 |
+| `docs/basket-candidates.md` | セクター別バスケット候補とPTS流動性データ |
+| `docs/req-impl-mapping.md` | 要求 ↔ 実装の対応表 |
