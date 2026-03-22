@@ -9,25 +9,17 @@ import { getPhaseConfig, type Phase } from "./gate.js";
 import { formatSignalReport } from "./format-signal.js";
 import { getDb, upsertSignal, saveRawMarketData, getHistory } from "./trade-history.js";
 import { getSignalProvider } from "./signal-provider.js";
-import type { DailyReturnRecord } from "./cfull-monitor.js";
-import type { CfullDriftReport } from "./cfull-monitor.js";
+import type { DailyReturnRecord, CfullDriftReport } from "./cfull-monitor.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
-type CliArgs = {
-  start: string; end: string;
-  percentile: number; percentileLow: number;
-  outputDir: string; csv?: string; phase: Phase;
-  L?: number; K?: number; lambda?: number; q?: number;
-};
+type CliArgs = { start: string; end: string; percentile: number; percentileLow: number;
+  outputDir: string; csv?: string; phase: Phase; L?: number; K?: number; lambda?: number; q?: number };
 
 function parseArgs(): CliArgs {
   const args = process.argv.slice(2);
-  let start = "", end = "";
-  let percentile = DEFAULT_PARAMS.confidencePercentile;
-  let percentileLow = DEFAULT_PARAMS.confidencePercentileLow;
-  let outputDir = "output";
-  let csv: string | undefined;
+  let start = "", end = "", outputDir = "output", csv: string | undefined;
+  let percentile = DEFAULT_PARAMS.confidencePercentile, percentileLow = DEFAULT_PARAMS.confidencePercentileLow;
   let phase: Phase = (process.env.PHASE as Phase) ?? "normal";
   let L: number | undefined, K: number | undefined, lambda: number | undefined, q: number | undefined;
 
@@ -101,20 +93,11 @@ async function main() {
   console.log(`Aligned data: ${dates.length} dates × ${tickers.length} tickers`);
 
   // 1b. Read trade history for provider diagnostics (e.g., Cfull drift)
-  const dbPath = path.join(outputDir, "trade-history.db");
-  let historyReturns: DailyReturnRecord[] = [];
-  {
-    const histDb = getDb(dbPath);
-    const histRows = getHistory(histDb);
-    histDb.close();
-    historyReturns = histRows
-      .filter((r) => r.gross_return != null)
-      .map((r) => ({
-        date: r.date,
-        grossReturn: r.gross_return!,
-        quintileRank: r.quintile_rank ?? undefined,
-      }));
-  }
+  const histDb = getDb(path.join(outputDir, "trade-history.db"));
+  const historyReturns: DailyReturnRecord[] = getHistory(histDb)
+    .filter((r) => r.gross_return != null)
+    .map((r) => ({ date: r.date, grossReturn: r.gross_return!, quintileRank: r.quintile_rank ?? undefined }));
+  histDb.close();
 
   // 2. Generate signals via provider
   const { signals, diagnostics } = await provider.generate({
@@ -156,75 +139,54 @@ async function main() {
 
   // 5. Output
   fs.mkdirSync(outputDir, { recursive: true });
-
   const jsonOutput = {
     generatedAt: new Date().toLocaleString("sv-SE", { timeZone: "Asia/Tokyo" }),
-    phase, provider: provider.name,
-    params: { ...params, confidencePercentileLow: percentileLow },
-    cfullDrift: driftReport ?? null,
-    confidencePercentile: percentile, confidencePercentileLow: percentileLow,
-    totalDates: confidenceResults.length,
-    tradeDays: tradeDays.length, highDays: highDays.length, mediumDays: mediumDays.length,
+    phase, provider: provider.name, params: { ...params, confidencePercentileLow: percentileLow },
+    cfullDrift: driftReport ?? null, confidencePercentile: percentile, confidencePercentileLow: percentileLow,
+    totalDates: confidenceResults.length, tradeDays: tradeDays.length,
+    highDays: highDays.length, mediumDays: mediumDays.length,
     lowDays: confidenceResults.length - highDays.length - mediumDays.length,
-    passRate: tradeDays.length / confidenceResults.length,
-    latestDecision: latestDecision ?? null,
+    passRate: tradeDays.length / confidenceResults.length, latestDecision: latestDecision ?? null,
     results: signals.map((s, i) => ({ ...s, confidence: confidenceResults[i] })),
   };
-  const jsonPath = path.join(outputDir, "signals.json");
-  fs.writeFileSync(jsonPath, JSON.stringify(jsonOutput, null, 2));
-  console.log(`JSON output: ${jsonPath}`);
+  fs.writeFileSync(path.join(outputDir, "signals.json"), JSON.stringify(jsonOutput, null, 2));
+  console.log(`JSON output: ${path.join(outputDir, "signals.json")}`);
 
   if (latestIdx >= 0) {
     const report = formatSignalReport(signals[latestIdx], confidenceResults[latestIdx], latestDecision);
-    const reportPath = path.join(outputDir, "latest-signal.txt");
-    fs.writeFileSync(reportPath, report);
-    console.log(`Latest signal report: ${reportPath}\n`);
+    fs.writeFileSync(path.join(outputDir, "latest-signal.txt"), report);
+    console.log(`Latest signal report: ${path.join(outputDir, "latest-signal.txt")}\n`);
     console.log(report);
   }
 
-  const summaryPath = path.join(outputDir, "trade-days.txt");
   const summaryLines = tradeDays.map((td) => {
     const sr = signals.find((s) => s.date === td.date)!;
     return `${td.date}  Band=${(td.band ?? "?").toUpperCase().padEnd(6)}  Range=${td.signalRange.toFixed(4)}  Long=[${sr.longCandidates.join(",")}]  Short=[${sr.shortCandidates.join(",")}]`;
   });
-  fs.writeFileSync(summaryPath, summaryLines.join("\n"));
-  console.log(`Trade day summary: ${summaryPath}`);
+  fs.writeFileSync(path.join(outputDir, "trade-days.txt"), summaryLines.join("\n"));
+  console.log(`Trade day summary: ${path.join(outputDir, "trade-days.txt")}`);
 
   // 6. Persist to trade-history SQLite
   if (latestIdx >= 0) {
     const conf = confidenceResults[latestIdx];
-
-    // Quintile rank (D.3): rank latest signalRange within PAST signal ranges only
     const pastRanges = signals.slice(0, latestIdx).map((s) => s.signalRange).sort((a, b) => a - b);
-    const latestRange = signals[latestIdx].signalRange;
     let quintileRank = 3;
     if (pastRanges.length >= 5) {
-      const pctile = pastRanges.filter((r) => r <= latestRange).length / pastRanges.length;
+      const pctile = pastRanges.filter((r) => r <= signals[latestIdx].signalRange).length / pastRanges.length;
       quintileRank = Math.min(5, Math.floor(pctile * 5) + 1);
     }
-
     const db = getDb(path.join(outputDir, "trade-history.db"));
     upsertSignal(db, {
-      date: signals[latestIdx].date,
-      band: conf.band ?? "low",
+      date: signals[latestIdx].date, band: conf.band ?? "low",
       signalRange: signals[latestIdx].signalRange,
-      thresholdHigh: conf.thresholdHigh ?? conf.threshold,
-      thresholdLow: conf.thresholdLow ?? conf.threshold,
-      llmJudgment: latestDecision?.llmResult?.judgment,
-      llmEventDominance: latestDecision?.eventDominance,
-      llmRawPrompt: latestDecision?.llmResult?.rawPrompt,
-      llmRawResponse: latestDecision?.llmResult?.rawResponse,
-      size: latestDecision?.size,
-      sizeMultiplier: latestDecision?.sizeMultiplier,
-      longCandidates: signals[latestIdx].longCandidates,
-      shortCandidates: signals[latestIdx].shortCandidates,
+      thresholdHigh: conf.thresholdHigh ?? conf.threshold, thresholdLow: conf.thresholdLow ?? conf.threshold,
+      llmJudgment: latestDecision?.llmResult?.judgment, llmEventDominance: latestDecision?.eventDominance,
+      llmRawPrompt: latestDecision?.llmResult?.rawPrompt, llmRawResponse: latestDecision?.llmResult?.rawResponse,
+      size: latestDecision?.size, sizeMultiplier: latestDecision?.sizeMultiplier,
+      longCandidates: signals[latestIdx].longCandidates, shortCandidates: signals[latestIdx].shortCandidates,
       phase, quintileRank,
     });
-    if (rawPrices.length > 0) {
-      saveRawMarketData(db, rawPrices);
-      console.log(`Raw market data saved: ${rawPrices.length} rows`);
-    }
-
+    if (rawPrices.length > 0) { saveRawMarketData(db, rawPrices); console.log(`Raw market data saved: ${rawPrices.length} rows`); }
     db.close();
     console.log(`Trade history updated: ${path.join(outputDir, "trade-history.db")}`);
   }

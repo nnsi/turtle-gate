@@ -8,6 +8,37 @@ import type { BrokerPort, OrderSide } from "./broker.js";
 import { MAX_TOTAL_POSITION_JPY, MAX_SIDE_COUNT } from "./config.js";
 import { expandSectorToBasket } from "./basket.js";
 import type { SectorSignalInput } from "./basket.js";
+import type { MarketIndicator } from "./market-context.js";
+
+export type VixRegime = "low" | "normal" | "high" | "unavailable";
+
+export type VixRegimeResult = {
+  regime: VixRegime;
+  vixLevel: number | null;
+  multiplier: number;
+};
+
+/**
+ * Determine position-size multiplier based on VIX regime (F-2).
+ *
+ *   VIX < 15:        low vol  → x1.3 (more aggressive)
+ *   VIX 15–25:       normal   → x1.0
+ *   VIX > 25:        high vol → x0.5 (defensive)
+ *   VIX unavailable:          → x1.0 (no change)
+ */
+export function getVixRegimeMultiplier(usIndicators: MarketIndicator[] | undefined): VixRegimeResult {
+  if (!usIndicators || usIndicators.length === 0) {
+    return { regime: "unavailable", vixLevel: null, multiplier: 1.0 };
+  }
+  const vix = usIndicators.find((i) => i.ticker === "^VIX");
+  if (!vix || vix.price <= 0) {
+    return { regime: "unavailable", vixLevel: null, multiplier: 1.0 };
+  }
+  const level = vix.price;
+  if (level < 15) return { regime: "low", vixLevel: level, multiplier: 1.3 };
+  if (level <= 25) return { regime: "normal", vixLevel: level, multiplier: 1.0 };
+  return { regime: "high", vixLevel: level, multiplier: 0.5 };
+}
 
 export type FinalCandidate = {
   ticker: string;

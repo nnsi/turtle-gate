@@ -229,29 +229,36 @@
 
 | ファイル | 行数 | 役割 |
 |---------|------|------|
-| `src/config.ts` | 127 | 設定・定数 |
-| `src/data.ts` | 300 | データ取得・CSV読込 |
+| `src/config.ts` | 162 | 設定・定数・銘柄表示名 |
+| `src/data.ts` | 357 | データ取得・CSV読込 |
 | `src/linalg.ts` | 150 | 線形代数（相関行列・固有値） |
-| `src/signal.ts` | 419 | PCA_SUBシグナル生成・確信度フィルター |
+| `src/signal.ts` | 433 | PCA_SUBシグナル生成・確信度フィルター |
+| `src/signal-pca-sub.ts` | 138 | PCA_SUBプロバイダー（SignalProvider DI） |
+| `src/signal-provider.ts` | 90 | SignalProviderインターフェース・DI |
 | `src/realtime.ts` | 170 | Yahoo Finance リアルタイム取得 |
 | `src/mechanical-filter.ts` | 176 | 一次機械フィルター |
 | `src/post-open-check.ts` | 121 | 寄り後価格確認 |
 | `src/llm.ts` | 275 | LLM判定（mock/OpenRouter） |
 | `src/news.ts` | 212 | ニュース取得（Finnhub/Google RSS） |
 | `src/market-context.ts` | 144 | 米国指標取得 |
-| `src/trade-decision.ts` | 210 | 最終売買判定 |
+| `src/trade-decision.ts` | 216 | 最終売買判定 |
 | `src/broker.ts` | 109 | BrokerPort（DI境界） |
 | `src/broker-mock.ts` | 145 | Mock broker |
 | `src/broker-kabu.ts` | 171 | kabu Station adapter |
-| `src/execute.ts` | 171 | 発注CLI（§8.8） |
-| `src/unwind.ts` | 133 | 手仕舞いCLI（§8.9） |
-| `src/monitor.ts` | 167 | 運用監視（§12/§13/§17.2/D.3） |
-| `src/gate.ts` | 166 | ゲート条件・フェーズ管理（§19） |
+| `src/basket.ts` | 113 | セクター→個別株バスケット変換 |
+| `src/execute.ts` | 169 | 発注CLI（§8.8、--basket対応） |
+| `src/execute-helpers.ts` | 131 | 発注ヘルパー（候補解決・バスケット展開） |
+| `src/unwind.ts` | 199 | 手仕舞いCLI（§8.9、バスケット表示対応） |
+| `src/monitor.ts` | 177 | 運用監視（§12/§13/§17.2/D.3） |
+| `src/gate.ts` | 180 | ゲート条件・フェーズ管理（§19） |
 | `src/cfull-monitor.ts` | 159 | Cfullドリフト+R/R+モノトニシティ |
 | `src/daily-report.ts` | 196 | 日次統合レポート（§17.1） |
-| `src/generate-signal.ts` | 165 | シグナル生成CLI（エントリーポイント） |
+| `src/generate-signal.ts` | 195 | シグナル生成CLI（エントリーポイント） |
 | `src/format-signal.ts` | 64 | シグナルレポートフォーマッタ |
-| `src/check-market.ts` | 199 | 市場チェックCLI |
-| `src/backtest.ts` | 215 | バックテストCLI |
+| `src/check-market.ts` | 223 | 市場チェックCLI |
+| `src/backtest.ts` | 198 | バックテストCLI（--basket対応） |
+| `src/backtest-basket.ts` | 156 | バスケットバックテストヘルパー |
 | `src/backtest-report.ts` | 190 | バックテスト成績レポート |
 | `src/backtest-analysis.ts` | 231 | 五分位・逆選択・年次分析 |
+| `src/trade-history.ts` | 229 | SQLite永続化 |
+| `src/run-monitor.ts` | 245 | 運用監視CLI |

@@ -7,7 +7,7 @@
  * With --basket, expands sector ETFs into individual stock baskets.
  *
  * Usage:
- *   npx tsx src/execute.ts [--market-check PATH] [--output DIR] [--size JPY] [--basket]
+ *   npx tsx src/execute.ts [--market-check PATH] [--output DIR] [--size JPY] [--basket] [--no-vix-regime]
  *
  * Env vars:
  *   BROKER_PROVIDER — "mock" (default, dry-run) | "kabu"
@@ -15,12 +15,12 @@
 
 import { getBroker } from "./broker.js";
 import { POSITION_SIZE_JPY, MAX_TOTAL_POSITION_JPY, MAX_SIDE_COUNT, JP_SECTOR_NAMES } from "./config.js";
-import { resolveCandidates, expandToBasket, executeOrders } from "./execute-helpers.js";
+import { resolveCandidates, expandToBasket, executeOrders, getVixRegimeMultiplier } from "./execute-helpers.js";
 import { getDb, upsertExecution } from "./trade-history.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
-type Args = { marketCheckFile: string; outputDir: string; positionSize: number; basket: boolean };
+type Args = { marketCheckFile: string; outputDir: string; positionSize: number; basket: boolean; noVixRegime: boolean };
 
 function parseArgs(): Args {
   const args = process.argv.slice(2);
@@ -28,17 +28,19 @@ function parseArgs(): Args {
   let outputDir = "output";
   let positionSize = POSITION_SIZE_JPY;
   let basket = false;
+  let noVixRegime = false;
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--market-check") marketCheckFile = args[++i];
     else if (args[i] === "--output") outputDir = args[++i];
     else if (args[i] === "--size") positionSize = Number(args[++i]);
     else if (args[i] === "--basket") basket = true;
+    else if (args[i] === "--no-vix-regime") noVixRegime = true;
   }
-  return { marketCheckFile, outputDir, positionSize, basket };
+  return { marketCheckFile, outputDir, positionSize, basket, noVixRegime };
 }
 
 async function main() {
-  const { marketCheckFile, outputDir, positionSize, basket } = parseArgs();
+  const { marketCheckFile, outputDir, positionSize, basket, noVixRegime } = parseArgs();
 
   if (!fs.existsSync(marketCheckFile)) {
     console.error(`market-check.json が見つかりません: ${marketCheckFile}`);
@@ -72,10 +74,24 @@ async function main() {
   }
 
   console.log(`Band: ${decision.band.toUpperCase()}, Size: ${decision.size} (×${decision.sizeMultiplier})`);
+
+  // VIX regime-based position sizing (F-2)
+  const vixResult = noVixRegime
+    ? { regime: "unavailable" as const, vixLevel: null, multiplier: 1.0 }
+    : getVixRegimeMultiplier(checkData.usIndicators);
+  const effectiveMultiplier = decision.sizeMultiplier * vixResult.multiplier;
+
+  if (noVixRegime) {
+    console.log("VIX Regime: disabled (--no-vix-regime)");
+  } else {
+    const levelStr = vixResult.vixLevel !== null ? vixResult.vixLevel.toFixed(1) : "N/A";
+    console.log(`VIX Regime: ${vixResult.regime} (VIX=${levelStr}, ×${vixResult.multiplier})`);
+  }
+  console.log(`Effective size multiplier: ×${effectiveMultiplier}`);
   console.log("");
 
   // Resolve final candidates (sector level — limits applied here)
-  const sectorCandidates = resolveCandidates(checkData, positionSize, decision.sizeMultiplier);
+  const sectorCandidates = resolveCandidates(checkData, positionSize, effectiveMultiplier);
   if (sectorCandidates.length === 0) {
     console.log("発注対象なし (全銘柄がフィルター不通過)");
     return;
@@ -111,6 +127,10 @@ async function main() {
     basket,
     positionSize,
     sizeMultiplier: decision.sizeMultiplier,
+    vixRegime: vixResult.regime,
+    vixLevel: vixResult.vixLevel,
+    vixMultiplier: vixResult.multiplier,
+    effectiveMultiplier,
     band: decision.band,
     orders: results,
   };
