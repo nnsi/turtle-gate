@@ -4,8 +4,8 @@ A-3 decisive test: PCA_SUB alpha survival in individual stock baskets.
 
 Signal generation uses ETF data (as in production).
 Returns are measured using both ETF and basket execution.
-If basket alpha is positive and significant, the basket strategy is viable
-regardless of tracking error.
+If basket alpha is positive and significant, proceed to paper trade (conditional Go).
+High TE means this may be a different strategy, not just ETF execution improvement.
 
 Output: output/basket-alpha-report.txt
 """
@@ -262,9 +262,16 @@ def run_backtest(close_df, basket_returns_df=None):
             "short": short_candidates,
         })
 
-    # Apply confidence filter (expanding window percentile)
+    # Apply confidence filter (expanding window percentile, strictly out-of-sample)
     for i, r in enumerate(results):
-        past_ranges = [results[j]["signal_range"] for j in range(i + 1)]
+        if i < 60:  # minimum lookback for stable percentiles
+            for pct in [90, 80, 75, 65]:
+                r[f"p{pct}_threshold"] = float('inf')
+            r["band_p90"] = "LOW"
+            r["band_p75"] = "LOW"
+            r["band_p65"] = "LOW"
+            continue
+        past_ranges = [results[j]["signal_range"] for j in range(i)]
         for pct in [90, 80, 75, 65]:
             r[f"p{pct}_threshold"] = np.percentile(past_ranges, pct)
         r["band_p90"] = "HIGH" if r["signal_range"] >= r["p90_threshold"] else \
@@ -410,13 +417,14 @@ def main():
     lines.append(f"  Basket P90 alpha: {bask_alpha:.1f} bps/day (t={bask_t:.2f})")
 
     if bask_alpha > 15 and bask_t > 2.0:
-        lines.append("  --> ALPHA SURVIVES. Basket execution is viable.")
-        lines.append("     Proceed with individual stock basket strategy.")
+        lines.append("  --> CONDITIONAL GO: Alpha survives in CC backtest.")
+        lines.append("     This is NOT a production promotion. Paper trade required.")
+        lines.append("     Note: evidence is CC-based. OC/costed validation pending.")
     elif bask_alpha > 5 and bask_t > 1.5:
         lines.append("  --> ALPHA WEAKENED but present. Marginal viability.")
         lines.append("     Consider: need PTS improvement to offset higher noise.")
     else:
-        lines.append("  --> ALPHA DOES NOT SURVIVE. Basket execution destroys the signal.")
+        lines.append("  --> NO-GO: Alpha does not survive basket execution.")
         lines.append("     Abandon basket approach. Stay with ETF execution.")
 
     report = "\n".join(lines)
