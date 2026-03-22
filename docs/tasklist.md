@@ -172,10 +172,10 @@ Phase B のペーパートレードが安定した後に着手。
   - ギャップ上位10%スキップでOC alpha 16.3→25.0bps (+53%)、t: 1.72→3.23
   - Q5（最大ギャップ日）はOC alpha=-7.4bps。取引するほど損をする
   - 出力: `output/gap-filter-report.txt`, `scripts/gap-filter-analysis.py`
-- [ ] **F-5**: ギャップフィルターの実装
-  - `check-market.ts` の寄り前チェックにギャップ閾値を追加
-  - 閾値: expanding window P90 of |gap| を超えたらスキップ
-  - `--no-gap-filter` で無効化可能にする
+- [x] **F-5**: ギャップフィルターの実装 → **完了 (2026-03-22)**
+  - `src/gap-filter.ts` 新規、`src/execute.ts` に組み込み
+  - 閾値: デフォルト75bps。`--no-gap-filter` で無効化可能
+  - ペーパートレードでフォワードデータ収集開始
 
 ---
 
