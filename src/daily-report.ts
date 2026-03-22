@@ -53,7 +53,7 @@ export function generateDailyReport(outputDir: string): DailyReport {
   const decision = (signals?.latestDecision ?? null) as Record<string, unknown> | null;
   const confidence = (latest?.confidence ?? {}) as Record<string, unknown>;
 
-  const date = (decision?.date ?? latest?.date ?? new Date().toISOString().slice(0, 10)) as string;
+  const date = (decision?.date ?? latest?.date ?? new Date().toLocaleDateString("sv-SE", { timeZone: "Asia/Tokyo" })) as string;
   const band = (decision?.band ?? confidence?.band ?? "unknown") as string;
   const signalRange = (decision?.signalRange ?? latest?.signalRange ?? 0) as number;
   const thresholdHigh = (decision?.thresholdHigh ?? confidence?.thresholdHigh ?? 0) as number;
@@ -84,7 +84,7 @@ export function generateDailyReport(outputDir: string): DailyReport {
 
   return {
     date,
-    generatedAt: new Date().toISOString(),
+    generatedAt: new Date().toLocaleString("sv-SE", { timeZone: "Asia/Tokyo" }),
     usMarketSummary,
     signalRange,
     band,

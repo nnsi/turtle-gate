@@ -9,6 +9,7 @@ import { fetchMarketContext, formatMarketContextForConsole, detectOvernightMoves
 import { getBroker } from "./broker.js";
 import type { Level2Quote } from "./broker.js";
 import type { TradeDecision } from "./trade-decision.js";
+import { getDb, upsertAnomaly, upsertBboSpread } from "./trade-history.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
@@ -160,7 +161,7 @@ async function main() {
   }
 
   // 5. Save results (includes BBO snapshot per §8.4.3)
-  const now = new Date().toISOString();
+  const now = new Date().toLocaleString("sv-SE", { timeZone: "Asia/Tokyo" });
   const output = {
     checkedAt: now,
     marketState: firstQuote?.quote.marketState ?? "UNKNOWN",
@@ -185,6 +186,29 @@ async function main() {
   const outPath = path.join(outputDir, "market-check.json");
   fs.writeFileSync(outPath, JSON.stringify(output, null, 2));
   console.log(`\n結果保存: ${outPath}`);
+
+  // Save daily BBO spread to DB (§19.2 G2)
+  {
+    const allSpreads = filterResults.map((r) => r.estimatedSpreadBps).filter((v) => v > 0);
+    if (allSpreads.length > 0) {
+      const avgBbo = allSpreads.reduce((a, b) => a + b, 0) / allSpreads.length;
+      const tradeDate = new Date().toLocaleDateString("sv-SE", { timeZone: "Asia/Tokyo" });
+      const db = getDb(path.join(outputDir, "trade-history.db"));
+      upsertBboSpread(db, tradeDate, avgBbo);
+      db.close();
+    }
+  }
+
+  // Record anomaly to trade-history DB (§8.10 / §19.2 G4)
+  const hasAnomaly = quotes.size < JP_TICKERS.length * 0.5
+    || filterResults.some((r) => !r.passed && r.reasons.some((rs) => rs.includes("取引停止") || rs.includes("異常値")));
+  if (hasAnomaly) {
+    const tradeDate = new Date().toLocaleDateString("sv-SE", { timeZone: "Asia/Tokyo" });
+    const db = getDb(path.join(outputDir, "trade-history.db"));
+    upsertAnomaly(db, tradeDate);
+    db.close();
+    console.log(`異常フラグ記録: ${tradeDate}`);
+  }
 
   // Exit code: non-zero if data fetch failed significantly
   if (quotes.size < JP_TICKERS.length * 0.5) {

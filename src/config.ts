@@ -15,8 +15,9 @@ export const JP_TICKERS = [
   "1633.T",
 ] as const;
 
-/** Human-readable names for JP ETFs */
+/** Human-readable names for JP tickers (sector ETFs + basket stocks) */
 export const JP_SECTOR_NAMES: Record<string, string> = {
+  // TOPIX-17 sector ETFs
   "1617.T": "食品",
   "1618.T": "エネルギー資源",
   "1619.T": "建設・資材",
@@ -34,6 +35,40 @@ export const JP_SECTOR_NAMES: Record<string, string> = {
   "1631.T": "銀行",
   "1632.T": "金融(除く銀行)",
   "1633.T": "不動産",
+  // Basket stocks — food
+  "2914.T": "JT", "2802.T": "味の素", "2502.T": "アサヒGHD",
+  // Basket stocks — energy
+  "5020.T": "ENEOS", "1605.T": "INPEX", "5019.T": "出光興産",
+  // Basket stocks — construction
+  "1925.T": "大和ハウス", "1928.T": "積水ハウス", "1812.T": "鹿島建設",
+  // Basket stocks — materials/chemicals
+  "4063.T": "信越化学", "4901.T": "富士フイルム", "4452.T": "花王",
+  // Basket stocks — pharma
+  "4502.T": "武田薬品", "4568.T": "第一三共", "4519.T": "中外製薬",
+  // Basket stocks — auto/transport equipment
+  "7203.T": "トヨタ", "7267.T": "ホンダ", "6902.T": "デンソー",
+  // Basket stocks — steel/nonferrous
+  "5401.T": "日本製鉄", "5802.T": "住友電工", "5803.T": "フジクラ",
+  // Basket stocks — machinery
+  "7011.T": "三菱重工", "6301.T": "コマツ", "6367.T": "ダイキン",
+  // Basket stocks — electronics/precision
+  "6758.T": "ソニーG", "6501.T": "日立", "8035.T": "東京エレクトロン",
+  // Basket stocks — IT/services
+  "7974.T": "任天堂", "6098.T": "リクルート", "9984.T": "ソフトバンクG",
+  // Basket stocks — electric/gas
+  "9531.T": "東京ガス", "9503.T": "関西電力", "9532.T": "大阪ガス",
+  // Basket stocks — transport/logistics
+  "9020.T": "JR東日本", "9022.T": "JR東海", "9101.T": "日本郵船",
+  // Basket stocks — trading
+  "8058.T": "三菱商事", "8001.T": "伊藤忠", "8031.T": "三井物産",
+  // Basket stocks — retail
+  "9983.T": "ファーストリテイリング", "3382.T": "セブン&iHD", "8267.T": "イオン",
+  // Basket stocks — banking
+  "8306.T": "三菱UFJFG", "8316.T": "三井住友FG", "8411.T": "みずほFG",
+  // Basket stocks — finance (ex-bank)
+  "8766.T": "東京海上", "8725.T": "MS&AD", "8630.T": "SOMPOHD",
+  // Basket stocks — real estate
+  "8801.T": "三井不動産", "8802.T": "三菱地所", "8830.T": "住友不動産",
 };
 
 /** Cyclical / Defensive classification (section 8.2.1) */

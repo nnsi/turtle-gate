@@ -134,16 +134,20 @@ function standardizeWindow(windowData: number[][]): number[][] {
  *   sized to match `tickers` (all columns, including potentially unavailable ones).
  * @returns signal for each JP ticker, or null if insufficient tickers
  */
+/** Tickers allowed to be absent (dynamic universe shrinking §8.1.2) */
+const OPTIONAL_TICKERS = new Set(["XLC", "XLRE"]);
+
 export function generateSignalForDate(
   windowData: number[][],
   tickers: string[],
   params: SignalParams,
   Cfull: number[][],
-): { signals: Record<string, number>; factorScores: number[]; intermediateData: IntermediateData } | null {
+): { signals: Record<string, number>; factorScores: number[]; intermediateData: IntermediateData; missingCoreTickers: string[] } | null {
   // §8.1.2: Dynamic universe shrinking — keep only tickers with complete data
   // in both the window AND the Cfull matrix (tickers absent in Cfull estimation
   // period, e.g. XLC pre-2018, will have NaN on the Cfull diagonal).
   const validCols: number[] = [];
+  const missingCoreTickers: string[] = [];
   for (let col = 0; col < tickers.length; col++) {
     // Check Cfull diagonal for NaN (ticker absent in Cfull estimation period)
     if (isNaN(Cfull[col][col])) continue;
@@ -151,7 +155,11 @@ export function generateSignalForDate(
     for (const row of windowData) {
       if (row[col] === undefined || isNaN(row[col])) { ok = false; break; }
     }
-    if (ok) validCols.push(col);
+    if (ok) {
+      validCols.push(col);
+    } else if (!OPTIONAL_TICKERS.has(tickers[col].replace(".T", ""))) {
+      missingCoreTickers.push(tickers[col]);
+    }
   }
 
   const vTickers = validCols.map((c) => tickers[c]);
@@ -221,7 +229,7 @@ export function generateSignalForDate(
     nTickers: N,
   };
 
-  return { signals, factorScores, intermediateData };
+  return { signals, factorScores, intermediateData, missingCoreTickers };
 }
 
 /**
@@ -280,6 +288,12 @@ export function generateSignals(
 
     const result = generateSignalForDate(windowData, tickers, params, Cfull);
     if (!result) continue; // skip if insufficient tickers (§8.1.2)
+
+    // §8.1.2 / §9.5: Skip day if core tickers (not XLC/XLRE) have missing data
+    if (result.missingCoreTickers.length > 0) {
+      console.warn(`${dates[t]}: データ欠損で当日見送り (missing: ${result.missingCoreTickers.join(", ")})`);
+      continue;
+    }
 
     const { signals, factorScores, intermediateData } = result;
     const { longCandidates, shortCandidates } = selectCandidates(signals, params.q);

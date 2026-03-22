@@ -22,12 +22,17 @@ export type PhaseConfig = {
   allowMediumBand: boolean;
 };
 
+/** Fixed one-way cost for G3 evaluation (§19.2: 片道10bps, L/S turnover=2) */
+const G3_FIXED_COST_ONE_WAY_BPS = 10;
+const G3_TURNOVER = 2; // daily L/S full replacement
+
 /** Daily record fed into gate evaluation. */
 export type GateHistoryEntry = {
   date: string;
   jpxAvg12mSpread: number;   // 12-month MA of JPX spread (one-way bps) for G1
   liveVsJpxRatio: number;    // live 09:10 BBO / JPX baseline ratio for G2
-  netReturn: number;          // net return after cost (one-way 10 bps) for G3
+  grossReturn: number;        // gross return (before cost) for G3
+  traded: boolean;            // actual trade execution flag for G3
   systemNormal: boolean;      // anomaly-free day flag for G4
 };
 
@@ -35,6 +40,8 @@ export type GateHistory = {
   entries: GateHistoryEntry[];
   /** Consecutive months where liveVsJpxRatio exceeded 1.5 (for G2) */
   consecutiveMonthsExceeding: number;
+  /** Latest BBO-measured liveVsJpxRatio (null if no BBO data) */
+  latestBboRatio: number | null;
 };
 
 const G1_SPREAD_LIMIT = 10;          // one-way bps
@@ -68,7 +75,8 @@ export function checkGates(history: GateHistory): GateStatus {
   const g1 = { passed: avg12m <= G1_SPREAD_LIMIT, avg12mSpread: avg12m };
 
   // G2: live-to-JPX ratio within 1.5x, not exceeding for 3 consecutive months
-  const latestRatio = latest?.liveVsJpxRatio ?? Infinity;
+  // Use latest BBO-measured ratio (skip days without actual BBO measurement)
+  const latestRatio = history.latestBboRatio ?? Infinity;
   const consMonths = history.consecutiveMonthsExceeding;
   const g2 = {
     passed: latestRatio <= G2_RATIO_LIMIT && consMonths < G2_MAX_CONSECUTIVE_MONTHS,
@@ -76,9 +84,15 @@ export function checkGates(history: GateHistory): GateStatus {
     consecutiveMonthsExceeding: consMonths,
   };
 
-  // G3: at least 20 trading days, cumulative net return > 0
-  const tradingDays = entries.length;
-  const cumNetReturn = entries.reduce((sum, e) => sum + e.netReturn, 0);
+  // G3: at least 20 trading days, cumulative net return > 0 (§19.2: 片道10bps固定)
+  // Use traded flag (not grossReturn) to identify actual trade days.
+  const tradeEntries = entries.filter((e) => e.traded);
+  const tradingDays = tradeEntries.length;
+  const dailyCost = G3_TURNOVER * G3_FIXED_COST_ONE_WAY_BPS / 10000;
+  const cumNetReturn = tradeEntries.reduce(
+    (sum, e) => sum + e.grossReturn - dailyCost,
+    0,
+  );
   const g3 = {
     passed: tradingDays >= G3_MIN_DAYS && cumNetReturn > 0,
     tradingDays,

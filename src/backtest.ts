@@ -7,12 +7,13 @@
  *
  * Usage:
  *   npx tsx src/backtest.ts --csv data/closes.csv [--percentile 90]
+ *   npx tsx src/backtest.ts --csv data/closes.csv --basket --stocks-csv data/stocks.csv
  */
 
 import { loadClosesFromCsv, loadOpensFromCsv, buildReturnMatrix, buildOCReturnMatrix } from "./data.js";
-import { generateSignals, applyDualBandFilter } from "./signal.js";
-import { correlationMatrix } from "./linalg.js";
-import { DEFAULT_PARAMS, US_TICKERS, JP_TICKERS, CFULL_START, CFULL_END } from "./config.js";
+import { applyDualBandFilter } from "./signal.js";
+import { DEFAULT_PARAMS, US_TICKERS, JP_TICKERS } from "./config.js";
+import { createPcaSubProvider } from "./signal-pca-sub.js";
 import * as fs from "node:fs";
 import {
   type DayResult,
@@ -30,6 +31,10 @@ import {
   reportOOS,
   reportAdverseSelection,
 } from "./backtest-analysis.js";
+import {
+  buildBasketReturnLookup, basketPortfolioReturn, type BasketReturnLookup,
+  getReturnMap, getNextDayOCReturns, portfolioReturn,
+} from "./backtest-basket.js";
 
 function parseArgs() {
   const args = process.argv.slice(2);
@@ -39,6 +44,8 @@ function parseArgs() {
   let percentileLow = DEFAULT_PARAMS.confidencePercentileLow;
   let output = "output/backtest";
   let start = "";
+  let basket = false;
+  let stocksCsv = "";
   const exclude: string[] = [];
 
   for (let i = 0; i < args.length; i++) {
@@ -50,54 +57,24 @@ function parseArgs() {
       case "--output": output = args[++i]; break;
       case "--start": start = args[++i]; break;
       case "--exclude": exclude.push(...args[++i].split(",")); break;
+      case "--basket": basket = true; break;
+      case "--stocks-csv": stocksCsv = args[++i]; break;
     }
   }
-  return { csv, opensCsv, percentile, percentileLow, output, start, exclude };
-}
-
-/** Get ticker→return map for a date offset from signalDate. */
-function getReturnMap(
-  dates: string[], matrix: number[][], tickers: string[],
-  signalDate: string, daysAhead: number = 1,
-): Record<string, number> | null {
-  const idx = dates.indexOf(signalDate);
-  if (idx < 0 || idx + daysAhead >= dates.length) return null;
-  const row = matrix[idx + daysAhead];
-  const result: Record<string, number> = {};
-  for (let i = 0; i < tickers.length; i++) result[tickers[i]] = row[i];
-  return result;
-}
-
-function getNextDayOCReturns(
-  ccDates: string[], ocDates: string[], ocMatrix: number[][],
-  ocTickers: string[], signalDate: string,
-): Record<string, number> | null {
-  const idx = ccDates.indexOf(signalDate);
-  if (idx < 0 || idx + 1 >= ccDates.length) return null;
-  const ocIdx = ocDates.indexOf(ccDates[idx + 1]);
-  if (ocIdx < 0) return null;
-  const row = ocMatrix[ocIdx];
-  const result: Record<string, number> = {};
-  for (let i = 0; i < ocTickers.length; i++) result[ocTickers[i]] = row[i];
-  return result;
-}
-
-function portfolioReturn(
-  dayReturns: Record<string, number>, longs: string[], shorts: string[],
-): number {
-  const lr = longs.reduce((s, t) => s + (dayReturns[t] ?? 0), 0) / longs.length;
-  const sr = shorts.reduce((s, t) => s + (dayReturns[t] ?? 0), 0) / shorts.length;
-  return lr - sr;
+  return { csv, opensCsv, percentile, percentileLow, output, start, exclude, basket, stocksCsv };
 }
 
 async function main() {
-  const { csv, opensCsv, percentile: pct, percentileLow: pctLow, output, start, exclude } = parseArgs();
+  const { csv, opensCsv, percentile: pct, percentileLow: pctLow, output, start, exclude, basket, stocksCsv } = parseArgs();
 
   const P = DEFAULT_PARAMS;
   console.log(`=== PCA_SUB Backtest === Data: ${csv}, Opens: ${opensCsv}`);
+  if (basket) console.log(`Basket mode: ON (stocks: ${stocksCsv || "N/A"})`);
   if (start) console.log(`Start filter: ${start}`);
   if (exclude.length) console.log(`Excluded tickers: ${exclude.join(", ")}`);
   console.log(`Params: L=${P.L}, K=${P.K}, λ=${P.lambda}, q=${P.q}  Confidence: P${pctLow}/P${pct}\n`);
+
+  if (basket && !stocksCsv) throw new Error("--basket requires --stocks-csv PATH");
 
   // 1. Load data
   let prices = loadClosesFromCsv(csv);
@@ -133,15 +110,13 @@ async function main() {
     console.log(`OC returns: ${oc.dates.length} dates × ${oc.tickers.length} JP tickers`);
   } else { console.log("WARNING: opens.csv not found, falling back to CC-only evaluation"); }
 
-  // Cfull estimation (§8.2.1)
-  const cfullRows = matrix.filter((_, i) => dates[i] >= CFULL_START && dates[i] <= CFULL_END);
-  const Cfull = correlationMatrix(cfullRows.length >= 60 ? cfullRows : matrix);
-  console.log(`Cfull estimated from ${(cfullRows.length >= 60 ? cfullRows : matrix).length} rows`);
+  // Load basket stock data (when --basket is active)
+  let basketLookup: BasketReturnLookup | null = null;
+  if (basket) basketLookup = buildBasketReturnLookup(stocksCsv, start);
 
-  // 2. Generate signals
-  console.log("Generating signals...");
-  const signals = generateSignals(dates, matrix, tickers, DEFAULT_PARAMS, Cfull);
-  console.log(`Signal dates: ${signals.length}`);
+  // 2. Generate signals via provider (handles Cfull estimation internally)
+  const provider = createPcaSubProvider();
+  const { signals } = await provider.generate({ dates, matrix, tickers, params: DEFAULT_PARAMS });
 
   // 3. Dual-band confidence filter (§8.3.3)
   const confidence = applyDualBandFilter(signals, pct, pctLow);
@@ -154,13 +129,21 @@ async function main() {
     const nextRetCC = getReturnMap(dates, matrix, tickers, sig.date);
     if (!nextRetCC) continue;
 
+    // Next trading date (for basket/OC return lookup)
+    const sigIdx = dates.indexOf(sig.date);
+    const nextDate = sigIdx >= 0 && sigIdx + 1 < dates.length ? dates[sigIdx + 1] : null;
+
     let retOC = NaN;
     if (hasOC) {
       const nextRetOC = getNextDayOCReturns(dates, ocDates, ocMatrix, ocTickers, sig.date);
       if (nextRetOC) retOC = portfolioReturn(nextRetOC, sig.longCandidates, sig.shortCandidates);
     }
 
-    const ccRet = portfolioReturn(nextRetCC, sig.longCandidates, sig.shortCandidates) * 10000;
+    // CC return: use basket returns when --basket is active, else ETF returns
+    const ccRet = basketLookup && nextDate
+      ? basketPortfolioReturn(basketLookup, nextRetCC, nextDate, sig.longCandidates, sig.shortCandidates) * 10000
+      : portfolioReturn(nextRetCC, sig.longCandidates, sig.shortCandidates) * 10000;
+
     results.push({
       date: sig.date, signalRange: sig.signalRange,
       longCandidates: sig.longCandidates, shortCandidates: sig.shortCandidates,
@@ -177,7 +160,7 @@ async function main() {
   const out: string[] = [];
   const log = (s: string) => { console.log(s); out.push(s); };
   const ocAvailable = hasOC && results.some((r) => !isNaN(r.nextDayReturnOC));
-  const retLabel = ocAvailable ? "OC" : "CC";
+  const retLabel = basket ? (ocAvailable ? "Basket-OC" : "Basket-CC") : (ocAvailable ? "OC" : "CC");
   const getRet = (r: DayResult) => ocAvailable && !isNaN(r.nextDayReturnOC) ? r.nextDayReturnOC : r.nextDayReturnCC;
   const ctx: ReportCtx = { results, pct, pctLow, ocAvailable, retLabel, getRet, annualFactor: 250 };
 

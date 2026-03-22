@@ -15,6 +15,7 @@ export type TradeHistory = {
   spreadCostBps: number;
   llmJudgment?: "tailwind" | "neutral" | "headwind" | "invalid";
   quintileRank?: number;
+  counterfactualReturn?: number | null;
 };
 
 export type MonitorConfig = {
@@ -83,11 +84,20 @@ export function computeMonitorReport(
       };
 
   // LLM quality (section 13.3)
+  // Use counterfactual returns for excluded days when available
   const passed = win.filter((h) => h.llmJudgment === "tailwind" || h.llmJudgment === "neutral");
   const excluded = win.filter((h) => h.llmJudgment === "headwind" || h.llmJudgment === "invalid");
   const llmQuality = passed.length === 0 && excluded.length === 0 ? null : (() => {
     const passAlpha = meanReturn(passed);
-    const excludeAlpha = meanReturn(excluded);
+    // For excluded days, use counterfactual return if available
+    const excludedWithReturn = excluded.filter((h) =>
+      h.counterfactualReturn != null || h.grossReturn !== 0,
+    );
+    const excludeAlpha = excludedWithReturn.length > 0
+      ? (excludedWithReturn.reduce((s, h) =>
+          s + (h.counterfactualReturn ?? h.grossReturn), 0,
+        ) / excludedWithReturn.length) * 10000
+      : 0;
     const diff = passAlpha - excludeAlpha;
     return {
       passAlpha, excludeAlpha, diff,
@@ -109,7 +119,7 @@ export function computeMonitorReport(
   for (const h of history) {
     if (!h.traded) continue;
     gross += h.grossReturn;
-    net += h.grossReturn - h.spreadCostBps / 10000;
+    net += h.grossReturn - (h.spreadCostBps * 2) / 10000; // turnover=2 for L/S
     consecutive = net < 0 ? consecutive + 1 : 0;
   }
   const cumulativeReturn = { gross, net, consecutiveNegativeDays: consecutive };

@@ -4,101 +4,41 @@
  *
  * Reads market-check.json, finds candidates that passed all filters,
  * calculates quantities, and places orders via BrokerPort.
+ * With --basket, expands sector ETFs into individual stock baskets.
  *
  * Usage:
- *   npx tsx src/execute.ts [--market-check PATH] [--output DIR] [--size JPY]
+ *   npx tsx src/execute.ts [--market-check PATH] [--output DIR] [--size JPY] [--basket]
  *
  * Env vars:
  *   BROKER_PROVIDER — "mock" (default, dry-run) | "kabu"
  */
 
 import { getBroker } from "./broker.js";
-import type { BrokerPort, OrderSide } from "./broker.js";
 import { POSITION_SIZE_JPY, MAX_TOTAL_POSITION_JPY, MAX_SIDE_COUNT, JP_SECTOR_NAMES } from "./config.js";
+import { resolveCandidates, expandToBasket, executeOrders } from "./execute-helpers.js";
 import { getDb, upsertExecution } from "./trade-history.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
-type Args = { marketCheckFile: string; outputDir: string; positionSize: number };
+type Args = { marketCheckFile: string; outputDir: string; positionSize: number; basket: boolean };
 
 function parseArgs(): Args {
   const args = process.argv.slice(2);
   let marketCheckFile = "output/market-check.json";
   let outputDir = "output";
   let positionSize = POSITION_SIZE_JPY;
+  let basket = false;
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--market-check") marketCheckFile = args[++i];
     else if (args[i] === "--output") outputDir = args[++i];
     else if (args[i] === "--size") positionSize = Number(args[++i]);
+    else if (args[i] === "--basket") basket = true;
   }
-  return { marketCheckFile, outputDir, positionSize };
-}
-
-type FinalCandidate = {
-  ticker: string;
-  side: OrderSide;
-  quantity: number;
-  price: number;
-};
-
-function resolveCandidates(
-  checkData: Record<string, any>,
-  positionSize: number,
-  sizeMultiplier: number,
-): FinalCandidate[] {
-  const filterResults: any[] = checkData.filterResults ?? [];
-  const postOpenResults: any[] = checkData.postOpenResults ?? [];
-  const quotes: Record<string, any> = checkData.quotes ?? {};
-
-  const passedFilter = new Set(filterResults.filter((r: any) => r.passed).map((r: any) => r.ticker));
-  const raw: FinalCandidate[] = [];
-
-  for (const poc of postOpenResults) {
-    if (!poc.passed || !passedFilter.has(poc.ticker)) continue;
-    const quote = quotes[poc.ticker];
-    const price = quote?.price ?? 0;
-    if (price <= 0) continue;
-
-    const notional = positionSize * sizeMultiplier;
-    const quantity = Math.floor(notional / price);
-    if (quantity <= 0) continue;
-
-    raw.push({ ticker: poc.ticker, side: poc.signalDirection as OrderSide, quantity, price });
-  }
-
-  // §12.1 片側銘柄数制限
-  const longs = raw.filter((c) => c.side === "long").slice(0, MAX_SIDE_COUNT);
-  const shorts = raw.filter((c) => c.side === "short").slice(0, MAX_SIDE_COUNT);
-  const limited = [...longs, ...shorts];
-
-  // §12.1 売買総額制限
-  let totalNotional = 0;
-  const final: FinalCandidate[] = [];
-  for (const c of limited) {
-    const notional = c.price * c.quantity;
-    if (totalNotional + notional > MAX_TOTAL_POSITION_JPY) break;
-    totalNotional += notional;
-    final.push(c);
-  }
-  return final;
-}
-
-async function executeOrders(broker: BrokerPort, candidates: FinalCandidate[]) {
-  const results = [];
-  for (const c of candidates) {
-    const result = await broker.placeOrder({
-      ticker: c.ticker,
-      side: c.side,
-      quantity: c.quantity,
-      orderType: "market",
-    });
-    results.push({ ...c, ...result });
-  }
-  return results;
+  return { marketCheckFile, outputDir, positionSize, basket };
 }
 
 async function main() {
-  const { marketCheckFile, outputDir, positionSize } = parseArgs();
+  const { marketCheckFile, outputDir, positionSize, basket } = parseArgs();
 
   if (!fs.existsSync(marketCheckFile)) {
     console.error(`market-check.json が見つかりません: ${marketCheckFile}`);
@@ -117,7 +57,7 @@ async function main() {
   const broker = await getBroker();
 
   console.log(`=== 発注実行 (§8.8) ===`);
-  console.log(`Broker: ${broker.name}`);
+  console.log(`Broker: ${broker.name}${basket ? " [BASKET MODE]" : ""}`);
   console.log(`Position size: ¥${positionSize.toLocaleString()}`);
   console.log(`Position limits: ¥${MAX_TOTAL_POSITION_JPY.toLocaleString()} total, ${MAX_SIDE_COUNT} per side`);
   console.log(`Market check: ${marketCheckFile} (${checkData.checkedAt})`);
@@ -134,19 +74,28 @@ async function main() {
   console.log(`Band: ${decision.band.toUpperCase()}, Size: ${decision.size} (×${decision.sizeMultiplier})`);
   console.log("");
 
-  // Resolve final candidates
-  const candidates = resolveCandidates(checkData, positionSize, decision.sizeMultiplier);
-  if (candidates.length === 0) {
+  // Resolve final candidates (sector level — limits applied here)
+  const sectorCandidates = resolveCandidates(checkData, positionSize, decision.sizeMultiplier);
+  if (sectorCandidates.length === 0) {
     console.log("発注対象なし (全銘柄がフィルター不通過)");
     return;
   }
 
-  console.log("--- 発注候補 ---");
+  // Expand to individual stocks when --basket is active
+  const quotes: Record<string, any> = checkData.quotes ?? {};
+  const candidates = basket ? expandToBasket(sectorCandidates, quotes) : sectorCandidates;
+  if (basket && candidates.length === 0) {
+    console.log("発注対象なし (バスケット展開後に有効な銘柄なし)");
+    return;
+  }
+
+  console.log(basket ? "--- 発注候補 (個別株バスケット) ---" : "--- 発注候補 ---");
   for (const c of candidates) {
     const name = JP_SECTOR_NAMES[c.ticker] ?? c.ticker;
+    const sector = c.sectorTicker ? ` ← ${JP_SECTOR_NAMES[c.sectorTicker] ?? c.sectorTicker}` : "";
     const notional = c.price * c.quantity;
     console.log(
-      `  ${c.side.toUpperCase().padEnd(5)} ${c.ticker} (${name})  ${c.quantity}株 @${c.price} = ¥${notional.toLocaleString()}`,
+      `  ${c.side.toUpperCase().padEnd(5)} ${c.ticker} (${name}${sector})  ${c.quantity}株 @${c.price} = ¥${notional.toLocaleString()}`,
     );
   }
   console.log("");
@@ -159,6 +108,7 @@ async function main() {
   const output = {
     executedAt: new Date().toISOString(),
     broker: broker.name,
+    basket,
     positionSize,
     sizeMultiplier: decision.sizeMultiplier,
     band: decision.band,
@@ -175,14 +125,17 @@ async function main() {
   // Write to trade-history SQLite
   if (results.length > 0) {
     const filterResults: any[] = checkData.filterResults ?? [];
-    const executedTickers = new Set(results.map((r: any) => r.ticker));
+    // In basket mode, map back to sector tickers for spread lookup
+    const sectorTickers = basket
+      ? new Set(results.map((r: any) => r.sectorTicker).filter(Boolean))
+      : new Set(results.map((r: any) => r.ticker));
     const relevantSpreads = filterResults
-      .filter((f: any) => executedTickers.has(f.ticker))
+      .filter((f: any) => sectorTickers.has(f.ticker))
       .map((f: any) => f.estimatedSpreadBps);
     const avgSpread = relevantSpreads.length > 0
       ? relevantSpreads.reduce((a: number, b: number) => a + b, 0) / relevantSpreads.length
       : 7.36;
-    const tradeDate = decision.date ?? new Date().toISOString().slice(0, 10);
+    const tradeDate = decision.date ?? new Date().toLocaleDateString("sv-SE", { timeZone: "Asia/Tokyo" });
     const db = getDb(path.join(outputDir, "trade-history.db"));
     upsertExecution(db, tradeDate, avgSpread);
     db.close();

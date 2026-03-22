@@ -52,6 +52,7 @@ function sizeFromLLMJudgment(judgment: LLMResult["judgment"]): { size: TradeSize
 export async function makeTradeDecision(
   signal: SignalResult,
   confidence: ConfidenceResult,
+  skipLLM = false,
 ): Promise<TradeDecision> {
   const band = confidence.band ?? "low";
   const thresholdHigh = confidence.thresholdHigh ?? confidence.threshold;
@@ -84,6 +85,11 @@ export async function makeTradeDecision(
       size: "normal",
       sizeMultiplier: 1.0,
     };
+  }
+
+  // Medium confidence without LLM (P80 all-pass mode) → auto-pass, normal size
+  if (band === "medium" && skipLLM) {
+    return { ...base, size: "normal", sizeMultiplier: 1.0 };
   }
 
   // Medium confidence → fetch context + LLM review (§8.5)

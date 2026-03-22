@@ -2,14 +2,15 @@
 /** Signal generation entry point (§8.3/§8.5/§8.6/§19). */
 
 import { fetchAllData } from "./data.js";
-import { generateSignals, applyDualBandFilter } from "./signal.js";
-import { correlationMatrix } from "./linalg.js";
-import { DEFAULT_PARAMS, CFULL_START, CFULL_END } from "./config.js";
+import { applyDualBandFilter } from "./signal.js";
+import { DEFAULT_PARAMS, CFULL_START } from "./config.js";
 import { makeTradeDecision, type TradeDecision } from "./trade-decision.js";
-import { computeCfullDrift, formatDriftReport } from "./cfull-monitor.js";
 import { getPhaseConfig, type Phase } from "./gate.js";
 import { formatSignalReport } from "./format-signal.js";
-import { getDb, upsertSignal } from "./trade-history.js";
+import { getDb, upsertSignal, saveRawMarketData, getHistory } from "./trade-history.js";
+import { getSignalProvider } from "./signal-provider.js";
+import type { DailyReturnRecord } from "./cfull-monitor.js";
+import type { CfullDriftReport } from "./cfull-monitor.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
@@ -45,7 +46,7 @@ function parseArgs(): CliArgs {
       case "--q": q = Number(args[++i]); break;
     }
   }
-  if (!end) end = new Date().toISOString().slice(0, 10);
+  if (!end) end = new Date().toLocaleDateString("sv-SE", { timeZone: "Asia/Tokyo" });
   if (!start) { const d = new Date(end); d.setFullYear(d.getFullYear() - 1); start = d.toISOString().slice(0, 10); }
   return { start, end, percentile, percentileLow, outputDir, csv, phase, L, K, lambda, q };
 }
@@ -62,45 +63,64 @@ async function main() {
   };
 
   // §19.3 Phase-based config override
-  const phaseConfig = getPhaseConfig(phase);
+  let phaseConfig = getPhaseConfig(phase);
+
+  // §13.3: Read monitor-override.json for auto-switch
+  const overridePath = path.join(outputDir, "monitor-override.json");
+  if (fs.existsSync(overridePath)) {
+    try {
+      const override = JSON.parse(fs.readFileSync(overridePath, "utf-8"));
+      if (override.action === "disable_llm") {
+        console.log(`Monitor override: LLM無効化 (${override.reason})`);
+        phaseConfig = { ...phaseConfig, useLLM: false };
+      } else if (override.action === "degrade_to_p90") {
+        console.log(`Monitor override: P90のみに縮退 (${override.reason})`);
+        phaseConfig = { ...phaseConfig, useLLM: false, minPercentile: 90, allowMediumBand: false };
+      }
+    } catch { /* ignore malformed override */ }
+  }
+
   const percentile = phaseConfig.minPercentile > cliPercentile ? phaseConfig.minPercentile : cliPercentile;
   const percentileLow = phaseConfig.allowMediumBand ? cliPercentileLow : percentile;
 
-  console.log(`Signal Generation (PCA_SUB)`);
+  // Resolve signal provider
+  const provider = await getSignalProvider();
+
+  console.log(`Signal Generation (${provider.name})`);
   console.log(`  Period: ${start} to ${end}`);
   console.log(`  Params: L=${params.L}, K=${params.K}, λ=${params.lambda}, q=${params.q}`);
   console.log(`  Confidence Filter: P${percentileLow}/P${percentile} (dual-band)`);
   console.log(`  Phase: ${phase} (LLM: ${phaseConfig.useLLM ? "ON" : "OFF"}, medium band: ${phaseConfig.allowMediumBand ? "ON" : "OFF"})`);
+  console.log(`  Signal Provider: ${provider.name}`);
   console.log(`  LLM Provider: ${process.env.LLM_PROVIDER ?? "mock"}`);
   console.log("");
 
   // 1. Fetch data
   const dataStart = start < CFULL_START ? start : CFULL_START;
-  const { dates, tickers, matrix } = await fetchAllData(dataStart, end, csv);
+  const { dates, tickers, matrix, rawPrices } = await fetchAllData(dataStart, end, csv);
   console.log(`Aligned data: ${dates.length} dates × ${tickers.length} tickers`);
 
-  // 1b. Estimate Cfull (§8.2.1)
-  const cfullRows = matrix.filter((_, i) => dates[i] >= CFULL_START && dates[i] <= CFULL_END);
-  if (cfullRows.length < 60) console.warn(`Cfull: only ${cfullRows.length} rows (need ≥60)`);
-  const cfullSource = cfullRows.length >= 60 ? cfullRows : matrix;
-  const Cfull = correlationMatrix(cfullSource);
-  console.log(`Cfull estimated from ${cfullSource.length} rows\n`);
-
-  // 2. Generate signals
-  const recentReturns = matrix.slice(Math.max(0, matrix.length - 250));
-  console.log("Generating signals...");
-  const signals = generateSignals(dates, matrix, tickers, params, Cfull);
-  console.log(`Generated ${signals.length} signal dates`);
-
-  // 2b. Cfull drift monitor (§8.2.1) — after signals so dailyReturns are available
-  const dailyReturns = signals.map((s) => ({ date: s.date, grossReturn: s.signalRange }));
-  const driftReport = recentReturns.length >= 60
-    ? computeCfullDrift(recentReturns, Cfull, dates[dates.length - 1], params.K, dailyReturns)
-    : null;
-  if (driftReport) {
-    for (const line of formatDriftReport(driftReport)) console.log(line);
-    console.log("");
+  // 1b. Read trade history for provider diagnostics (e.g., Cfull drift)
+  const dbPath = path.join(outputDir, "trade-history.db");
+  let historyReturns: DailyReturnRecord[] = [];
+  {
+    const histDb = getDb(dbPath);
+    const histRows = getHistory(histDb);
+    histDb.close();
+    historyReturns = histRows
+      .filter((r) => r.gross_return != null)
+      .map((r) => ({
+        date: r.date,
+        grossReturn: r.gross_return!,
+        quintileRank: r.quintile_rank ?? undefined,
+      }));
   }
+
+  // 2. Generate signals via provider
+  const { signals, diagnostics } = await provider.generate({
+    dates, matrix, tickers, params, historyReturns,
+  });
+  const driftReport = diagnostics.driftReport as CfullDriftReport | null | undefined;
 
   // 3. Dual-band confidence filter (§8.3)
   const confidenceResults = applyDualBandFilter(signals, percentile, percentileLow);
@@ -127,10 +147,7 @@ async function main() {
         console.log("  *** EVENT DOMINANCE DETECTED — 当日全売買停止 (§11.3) ***");
       }
     } else if (band === "medium" && !phaseConfig.useLLM) {
-      // Phase without LLM: medium band auto-pass (P80 all-pass mode)
-      latestDecision = await makeTradeDecision(signals[latestIdx], {
-        ...confidenceResults[latestIdx], band: "high", // treat as high for auto-pass
-      });
+      latestDecision = await makeTradeDecision(signals[latestIdx], confidenceResults[latestIdx], true);
     } else if (band === "high") {
       latestDecision = await makeTradeDecision(signals[latestIdx], confidenceResults[latestIdx]);
     }
@@ -141,10 +158,10 @@ async function main() {
   fs.mkdirSync(outputDir, { recursive: true });
 
   const jsonOutput = {
-    generatedAt: new Date().toISOString(),
-    phase,
+    generatedAt: new Date().toLocaleString("sv-SE", { timeZone: "Asia/Tokyo" }),
+    phase, provider: provider.name,
     params: { ...params, confidencePercentileLow: percentileLow },
-    cfullDrift: driftReport,
+    cfullDrift: driftReport ?? null,
     confidencePercentile: percentile, confidencePercentileLow: percentileLow,
     totalDates: confidenceResults.length,
     tradeDays: tradeDays.length, highDays: highDays.length, mediumDays: mediumDays.length,
@@ -176,6 +193,16 @@ async function main() {
   // 6. Persist to trade-history SQLite
   if (latestIdx >= 0) {
     const conf = confidenceResults[latestIdx];
+
+    // Quintile rank (D.3): rank latest signalRange within PAST signal ranges only
+    const pastRanges = signals.slice(0, latestIdx).map((s) => s.signalRange).sort((a, b) => a - b);
+    const latestRange = signals[latestIdx].signalRange;
+    let quintileRank = 3;
+    if (pastRanges.length >= 5) {
+      const pctile = pastRanges.filter((r) => r <= latestRange).length / pastRanges.length;
+      quintileRank = Math.min(5, Math.floor(pctile * 5) + 1);
+    }
+
     const db = getDb(path.join(outputDir, "trade-history.db"));
     upsertSignal(db, {
       date: signals[latestIdx].date,
@@ -185,12 +212,19 @@ async function main() {
       thresholdLow: conf.thresholdLow ?? conf.threshold,
       llmJudgment: latestDecision?.llmResult?.judgment,
       llmEventDominance: latestDecision?.eventDominance,
+      llmRawPrompt: latestDecision?.llmResult?.rawPrompt,
+      llmRawResponse: latestDecision?.llmResult?.rawResponse,
       size: latestDecision?.size,
       sizeMultiplier: latestDecision?.sizeMultiplier,
       longCandidates: signals[latestIdx].longCandidates,
       shortCandidates: signals[latestIdx].shortCandidates,
-      phase,
+      phase, quintileRank,
     });
+    if (rawPrices.length > 0) {
+      saveRawMarketData(db, rawPrices);
+      console.log(`Raw market data saved: ${rawPrices.length} rows`);
+    }
+
     db.close();
     console.log(`Trade history updated: ${path.join(outputDir, "trade-history.db")}`);
   }

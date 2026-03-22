@@ -10,6 +10,9 @@ export type PriceRow = {
   ticker: string;
   close: number;
   open?: number;
+  high?: number;
+  low?: number;
+  volume?: number;
 }
 
 export type ReturnRow = {
@@ -46,6 +49,39 @@ export function loadClosesFromCsv(csvPath: string): PriceRow[] {
     }
   }
 
+  return rows;
+}
+
+/**
+ * Load OHLCV data from a CSV file (format: date,ticker,open,high,low,close,volume).
+ * Used for raw data persistence when CSV is the data source.
+ */
+export function loadOhlcvFromCsv(csvPath: string): PriceRow[] {
+  if (!fs.existsSync(csvPath)) return [];
+  const content = fs.readFileSync(csvPath, "utf-8");
+  const lines = content.trim().split("\n");
+  const header = lines[0].split(",");
+  const colIdx = (name: string) => header.indexOf(name);
+  const iDate = colIdx("date"), iTicker = colIdx("ticker");
+  const iOpen = colIdx("open"), iHigh = colIdx("high"), iLow = colIdx("low");
+  const iClose = colIdx("close"), iVol = colIdx("volume");
+  if (iDate < 0 || iClose < 0) return [];
+
+  const rows: PriceRow[] = [];
+  for (let i = 1; i < lines.length; i++) {
+    const cols = lines[i].split(",");
+    const close = parseFloat(cols[iClose]);
+    if (isNaN(close)) continue;
+    rows.push({
+      date: cols[iDate],
+      ticker: iTicker >= 0 ? cols[iTicker] : "",
+      close,
+      open: iOpen >= 0 ? parseFloat(cols[iOpen]) || undefined : undefined,
+      high: iHigh >= 0 ? parseFloat(cols[iHigh]) || undefined : undefined,
+      low: iLow >= 0 ? parseFloat(cols[iLow]) || undefined : undefined,
+      volume: iVol >= 0 ? parseFloat(cols[iVol]) || undefined : undefined,
+    });
+  }
   return rows;
 }
 
@@ -152,15 +188,27 @@ async function fetchTickerPrices(
       const timestamps: number[] = result.timestamp ?? [];
       const closes: (number | null)[] =
         result.indicators?.quote?.[0]?.close ?? [];
+      const opens: (number | null)[] =
+        result.indicators?.quote?.[0]?.open ?? [];
+      const highs: (number | null)[] =
+        result.indicators?.quote?.[0]?.high ?? [];
+      const lows: (number | null)[] =
+        result.indicators?.quote?.[0]?.low ?? [];
+      const volumes: (number | null)[] =
+        result.indicators?.quote?.[0]?.volume ?? [];
 
       const rows: PriceRow[] = [];
       for (let i = 0; i < timestamps.length; i++) {
         if (closes[i] != null) {
           const d = new Date(timestamps[i] * 1000);
           rows.push({
-            date: d.toISOString().slice(0, 10),
+            date: d.toLocaleDateString("sv-SE", { timeZone: "Asia/Tokyo" }),
             ticker,
             close: closes[i]!,
+            open: opens[i] ?? undefined,
+            high: highs[i] ?? undefined,
+            low: lows[i] ?? undefined,
+            volume: volumes[i] ?? undefined,
           });
         }
       }
@@ -254,13 +302,21 @@ export async function fetchAllData(
   startDate: string,
   endDate: string,
   csvPath?: string,
-): Promise<{ dates: string[]; tickers: string[]; matrix: number[][] }> {
+): Promise<{ dates: string[]; tickers: string[]; matrix: number[][]; rawPrices: PriceRow[] }> {
   let allPrices: PriceRow[];
 
   if (csvPath && fs.existsSync(csvPath)) {
     console.log(`Loading data from CSV: ${csvPath}`);
-    allPrices = loadClosesFromCsv(csvPath);
-    console.log(`  Loaded ${allPrices.length} price rows`);
+    // Try OHLCV format first (date,ticker,open,high,low,close,volume), fallback to wide closes
+    const ohlcvPath = csvPath.replace(/\.csv$/, "-ohlcv.csv");
+    const ohlcvRows = loadOhlcvFromCsv(ohlcvPath);
+    if (ohlcvRows.length > 0) {
+      allPrices = ohlcvRows;
+      console.log(`  Loaded ${allPrices.length} OHLCV rows from ${ohlcvPath}`);
+    } else {
+      allPrices = loadClosesFromCsv(csvPath);
+      console.log(`  Loaded ${allPrices.length} close-only rows`);
+    }
   } else {
     console.log("Fetching US sector ETF prices...");
     const usPrices: PriceRow[] = [];
@@ -296,5 +352,6 @@ export async function fetchAllData(
   // Sparse mode (§8.1.2) fills NaN for missing tickers instead of dropping dates,
   // enabling per-window dynamic universe shrinking in generateSignalForDate().
   // Callers that compute Cfull must handle NaN columns appropriately.
-  return buildReturnMatrix(allReturns, activeTickers, true);
+  const result = buildReturnMatrix(allReturns, activeTickers, true);
+  return { ...result, rawPrices: allPrices };
 }
