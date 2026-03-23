@@ -143,34 +143,37 @@ export function generateSignalForDate(
   params: SignalParams,
   Cfull: number[][],
 ): { signals: Record<string, number>; factorScores: number[]; intermediateData: IntermediateData; missingCoreTickers: string[] } | null {
-  // §8.1.2: Dynamic universe shrinking — keep only tickers with complete data
-  // in both the window AND the Cfull matrix (tickers absent in Cfull estimation
-  // period, e.g. XLC pre-2018, will have NaN on the Cfull diagonal).
+  // §8.1.2: Dynamic universe shrinking — tickers available in Cfull
   const validCols: number[] = [];
   const missingCoreTickers: string[] = [];
   for (let col = 0; col < tickers.length; col++) {
-    // Check Cfull diagonal for NaN (ticker absent in Cfull estimation period)
-    if (isNaN(Cfull[col][col])) continue;
-    let ok = true;
-    for (const row of windowData) {
-      if (row[col] === undefined || isNaN(row[col])) { ok = false; break; }
+    if (isNaN(Cfull[col][col])) {
+      if (!OPTIONAL_TICKERS.has(tickers[col].replace(".T", ""))) {
+        missingCoreTickers.push(tickers[col]);
+      }
+      continue;
     }
-    if (ok) {
-      validCols.push(col);
-    } else if (!OPTIONAL_TICKERS.has(tickers[col].replace(".T", ""))) {
-      missingCoreTickers.push(tickers[col]);
-    }
+    validCols.push(col);
   }
 
   const vTickers = validCols.map((c) => tickers[c]);
   const nUS = vTickers.filter((t) => (US_TICKERS as readonly string[]).includes(t)).length;
   const nJP = vTickers.length - nUS;
-
-  // Need at least 1 US and 1 JP ticker
   if (nUS === 0 || nJP === 0) return null;
 
-  // Slice window data to valid columns only
-  const vWindow = windowData.map((row) => validCols.map((c) => row[c]));
+  // Filter window to common trading days (all valid tickers have data).
+  // Holiday gaps (US/JP calendar mismatch) create NaN rows — drop them.
+  const fullWindow = windowData.map((row) => validCols.map((c) => row[c]));
+  const validRowMask = fullWindow.map((row) => row.every((v) => v !== undefined && !isNaN(v)));
+
+  // "Today" (last row) must have valid data
+  if (!validRowMask[validRowMask.length - 1]) return null;
+
+  const filteredWindow = fullWindow.filter((_, i) => validRowMask[i]);
+  if (filteredWindow.length < params.L + 1) return null;
+
+  // Use the most recent L+1 valid rows (L past + 1 today)
+  const vWindow = filteredWindow.slice(-(params.L + 1));
 
   // Slice Cfull to valid columns
   const vCfull = validCols.map((i) => validCols.map((j) => Cfull[i][j]));
@@ -279,12 +282,13 @@ export function generateSignals(
 ): SignalResult[] {
   const results: SignalResult[] = [];
 
-  // Window: L past days + today = L+1 rows.
-  // t indexes "today" in the matrix (0-based). Need t >= L so that
-  // matrix[t-L .. t] has L+1 rows.
+  // Window: provide extra rows to accommodate holiday-gap NaN filtering
+  // in sparse mode. generateSignalForDate will filter to common trading
+  // days and use the last L+1 valid rows.
+  const extra = Math.ceil(params.L * 0.25);
   for (let t = params.L; t < matrix.length; t++) {
-    // L+1 rows: past L days [t-L, ..., t-1] + today [t]
-    const windowData = matrix.slice(t - params.L, t + 1);
+    const windowStart = Math.max(0, t - params.L - extra);
+    const windowData = matrix.slice(windowStart, t + 1);
 
     const result = generateSignalForDate(windowData, tickers, params, Cfull);
     if (!result) continue; // skip if insufficient tickers (§8.1.2)

@@ -132,7 +132,9 @@ export function formatDailyReport(report: DailyReport): string {
     lines.push("--- 米国市場概況 ---");
     for (const ind of report.usMarketSummary) {
       const i = ind as Record<string, unknown>;
-      lines.push(`  ${i.symbol}: ${i.price} (${i.changePercent}%)`);
+      const pct = typeof i.changePct === "number" ? (i.changePct * 100).toFixed(2) : "?";
+      lines.push(`  ${i.label}: ${i.price} (${pct}%)`);
+
     }
     lines.push("");
   }

@@ -28,15 +28,19 @@ export function estimateCfull(
   const cfullSource = cfullRows.length >= 60 ? cfullRows : matrix;
   const N = tickers.length;
 
-  const cfullValidCols: boolean[] = new Array(N).fill(true);
-  for (const row of cfullSource) {
-    for (let c = 0; c < N; c++) {
-      if (isNaN(row[c])) cfullValidCols[c] = false;
-    }
+  // Identify tickers that existed during estimation period (≥50% valid data).
+  // Holiday gaps (US/JP calendar mismatch) are OK; non-existent tickers (XLC pre-2018) fail.
+  const cleanCols: number[] = [];
+  for (let c = 0; c < N; c++) {
+    let valid = 0;
+    for (const row of cfullSource) { if (!isNaN(row[c])) valid++; }
+    if (valid >= cfullSource.length * 0.5) cleanCols.push(c);
   }
 
-  const cleanCols = cfullValidCols.map((v, i) => v ? i : -1).filter((i) => i >= 0);
-  const cleanRows = cfullSource.map((row) => cleanCols.map((c) => row[c]));
+  // Filter to common trading days (all clean tickers have data)
+  const cleanRows = cfullSource
+    .map((row) => cleanCols.map((c) => row[c]))
+    .filter((row) => row.every((v) => !isNaN(v)));
   const cleanCorr = correlationMatrix(cleanRows);
 
   const Cfull: number[][] = Array.from({ length: N }, () => new Array(N).fill(NaN));
@@ -111,7 +115,9 @@ export function createPcaSubProvider(): SignalProvider {
 
       // 3. Cfull drift monitoring
       const recentReturns = matrix.slice(Math.max(0, matrix.length - 250));
-      const cleanRecentReturns = recentReturns.map((row) => cleanCols.map((c) => row[c]));
+      const cleanRecentReturns = recentReturns
+        .map((row) => cleanCols.map((c) => row[c]))
+        .filter((row) => row.every((v) => !isNaN(v)));
       const cleanCorr = cleanCols.map((i) => cleanCols.map((j) => Cfull[i][j]));
       const dailyReturns = buildDailyReturns(signals, historyReturns, tickers, dates, matrix);
 

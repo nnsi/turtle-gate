@@ -40,6 +40,6 @@ claude -p "
 - trade-history.db の蓄積日数（B-6完了まであと何営業日か）
 - 問題があれば次のアクションを提案
 
-結果を output/daily-review-${DATE}.txt に保存してください。
+結果を標準出力に出力してください（ファイル保存はシェル側で行います）。
 問題がなければ1段落で終わらせてOK。
 " --allowedTools Read,Write,Bash,Glob 2>&1 | tee "output/daily-review-${DATE}.txt"
