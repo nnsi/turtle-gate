@@ -175,15 +175,17 @@ function main(): void {
   const db = getDb(dbPath);
   const rows = getHistory(db);
   db.close();
-  console.log(`Trade history: ${rows.length} rows loaded`);
+  // Rows with signal data (for band pass rate, cumulative return, etc.)
+  const signalRows = rows.filter((r) => r.signal_range != null);
+  console.log(`Trade history: ${rows.length} rows loaded (${signalRows.length} with signals)`);
 
   if (rows.length === 0) {
     console.log("No trade history found. Nothing to report.");
     return;
   }
 
-  // 2. Monitor report
-  const monitorHistory = toStrictHistory(toMonitorHistory(rows));
+  // 2. Monitor report (only signal rows for band/return stats)
+  const monitorHistory = toStrictHistory(toMonitorHistory(signalRows));
   const avgSpread12m = computeAvgSpread12m(rows);
   const report = computeMonitorReport(monitorHistory, avgSpread12m);
   printMonitorReport(report);

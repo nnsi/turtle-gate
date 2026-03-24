@@ -12,6 +12,13 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# 週末(土日)はスキップ — JPX休場日
+DOW=$(date +%u)  # 1=Mon ... 7=Sun
+if [ "$DOW" -ge 6 ]; then
+  echo "Weekend (day=$DOW) — skipping pipeline."
+  exit 0
+fi
+
 export BROKER_PROVIDER="${BROKER_PROVIDER:-mock}"
 export LLM_PROVIDER="${LLM_PROVIDER:-mock}"
 
