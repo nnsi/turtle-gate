@@ -6,7 +6,7 @@
  * instead of sector ETF returns.
  */
 
-import { loadClosesFromCsv, buildReturnMatrix } from "./data.js";
+import { loadClosesFromCsv, loadOpensFromCsv, buildReturnMatrix } from "./data.js";
 import { SECTOR_BASKETS } from "./basket.js";
 
 export type BasketReturnLookup = {
@@ -94,6 +94,61 @@ export function buildBasketReturnLookup(
   console.log(`Basket sectors covered: ${coveredSectors.length}/17`);
 
   return { getReturn, dates, stockTickers: activeTickers };
+}
+
+/**
+ * Build a lookup that maps (date, sectorTicker) -> equal-weight basket OC return.
+ * OC return = close/open - 1 for each stock, then averaged across basket.
+ */
+export function buildBasketOCReturnLookup(
+  stocksClosesCsv: string,
+  stocksOpensCsv: string,
+  startDate?: string,
+): BasketReturnLookup | null {
+  const allStockTickers: string[] = [];
+  for (const basket of Object.values(SECTOR_BASKETS)) {
+    for (const s of basket.stocks) allStockTickers.push(s.ticker);
+  }
+  const uniqueTickers = [...new Set(allStockTickers)];
+
+  let closes = loadClosesFromCsv(stocksClosesCsv);
+  let opens = loadOpensFromCsv(stocksOpensCsv);
+  if (startDate) {
+    closes = closes.filter((p) => p.date >= startDate);
+    opens = opens.filter((p) => p.date >= startDate);
+  }
+
+  // Build date+ticker -> OC return map
+  const closeMap = new Map<string, number>();
+  for (const c of closes) closeMap.set(`${c.date}|${c.ticker}`, c.close);
+  const openMap = new Map<string, number>();
+  for (const o of opens) openMap.set(`${o.date}|${o.ticker}`, o.open!);
+
+  const allDates = [...new Set(closes.filter((c) => uniqueTickers.includes(c.ticker)).map((c) => c.date))].sort();
+
+  // Pre-build sector -> stock tickers
+  const sectorStocks = new Map<string, string[]>();
+  for (const [sectorTicker, basket] of Object.entries(SECTOR_BASKETS)) {
+    sectorStocks.set(sectorTicker, basket.stocks.map((s) => s.ticker));
+  }
+
+  const getReturn = (date: string, sectorTicker: string): number | undefined => {
+    const stocks = sectorStocks.get(sectorTicker);
+    if (!stocks) return undefined;
+    let sum = 0, count = 0;
+    for (const t of stocks) {
+      const c = closeMap.get(`${date}|${t}`);
+      const o = openMap.get(`${date}|${t}`);
+      if (c != null && o != null && o > 0) {
+        sum += c / o - 1;
+        count++;
+      }
+    }
+    return count > 0 ? sum / count : undefined;
+  };
+
+  console.log(`Basket OC data: ${allDates.length} dates`);
+  return { getReturn, dates: allDates, stockTickers: uniqueTickers };
 }
 
 /**

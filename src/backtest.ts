@@ -32,7 +32,8 @@ import {
   reportAdverseSelection,
 } from "./backtest-analysis.js";
 import {
-  buildBasketReturnLookup, basketPortfolioReturn, type BasketReturnLookup,
+  buildBasketReturnLookup, buildBasketOCReturnLookup,
+  basketPortfolioReturn, type BasketReturnLookup,
   getReturnMap, getNextDayOCReturns, portfolioReturn,
 } from "./backtest-basket.js";
 
@@ -46,6 +47,7 @@ function parseArgs() {
   let start = "";
   let basket = false;
   let stocksCsv = "";
+  let stocksOpensCsv = "";
   const exclude: string[] = [];
 
   for (let i = 0; i < args.length; i++) {
@@ -59,13 +61,14 @@ function parseArgs() {
       case "--exclude": exclude.push(...args[++i].split(",")); break;
       case "--basket": basket = true; break;
       case "--stocks-csv": stocksCsv = args[++i]; break;
+      case "--stocks-opens": stocksOpensCsv = args[++i]; break;
     }
   }
-  return { csv, opensCsv, percentile, percentileLow, output, start, exclude, basket, stocksCsv };
+  return { csv, opensCsv, percentile, percentileLow, output, start, exclude, basket, stocksCsv, stocksOpensCsv };
 }
 
 async function main() {
-  const { csv, opensCsv, percentile: pct, percentileLow: pctLow, output, start, exclude, basket, stocksCsv } = parseArgs();
+  const { csv, opensCsv, percentile: pct, percentileLow: pctLow, output, start, exclude, basket, stocksCsv, stocksOpensCsv } = parseArgs();
 
   const P = DEFAULT_PARAMS;
   console.log(`=== PCA_SUB Backtest === Data: ${csv}, Opens: ${opensCsv}`);
@@ -112,7 +115,13 @@ async function main() {
 
   // Load basket stock data (when --basket is active)
   let basketLookup: BasketReturnLookup | null = null;
-  if (basket) basketLookup = buildBasketReturnLookup(stocksCsv, start);
+  let basketOCLookup: BasketReturnLookup | null = null;
+  if (basket) {
+    basketLookup = buildBasketReturnLookup(stocksCsv, start);
+    if (stocksOpensCsv) {
+      basketOCLookup = buildBasketOCReturnLookup(stocksCsv, stocksOpensCsv, start);
+    }
+  }
 
   // 2. Generate signals via provider (handles Cfull estimation internally)
   const provider = createPcaSubProvider();
@@ -134,7 +143,10 @@ async function main() {
     const nextDate = sigIdx >= 0 && sigIdx + 1 < dates.length ? dates[sigIdx + 1] : null;
 
     let retOC = NaN;
-    if (hasOC) {
+    if (basketOCLookup && nextDate) {
+      // Basket OC: individual stock open-to-close returns
+      retOC = basketPortfolioReturn(basketOCLookup, {}, nextDate, sig.longCandidates, sig.shortCandidates);
+    } else if (hasOC) {
       const nextRetOC = getNextDayOCReturns(dates, ocDates, ocMatrix, ocTickers, sig.date);
       if (nextRetOC) retOC = portfolioReturn(nextRetOC, sig.longCandidates, sig.shortCandidates);
     }
