@@ -196,13 +196,15 @@ async function fetchTickerPrices(
         result.indicators?.quote?.[0]?.low ?? [];
       const volumes: (number | null)[] =
         result.indicators?.quote?.[0]?.volume ?? [];
+      // Use exchange timezone to avoid date shift (US close 16:00 EDT → JST +1 day bug)
+      const tz: string = result.meta?.exchangeTimezoneName ?? "Asia/Tokyo";
 
       const rows: PriceRow[] = [];
       for (let i = 0; i < timestamps.length; i++) {
         if (closes[i] != null) {
           const d = new Date(timestamps[i] * 1000);
           rows.push({
-            date: d.toLocaleDateString("sv-SE", { timeZone: "Asia/Tokyo" }),
+            date: d.toLocaleDateString("sv-SE", { timeZone: tz }),
             ticker,
             close: closes[i]!,
             open: opens[i] ?? undefined,
@@ -212,7 +214,11 @@ async function fetchTickerPrices(
           });
         }
       }
-      return rows;
+      // Deduplicate by date — Yahoo Finance may return two bars for the
+      // latest day (one at open, one at close). Keep the last entry.
+      const byDate = new Map<string, PriceRow>();
+      for (const r of rows) byDate.set(r.date, r);
+      return [...byDate.values()];
     } catch (err) {
       lastErr = err;
       await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
